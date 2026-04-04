@@ -7,7 +7,10 @@ nativeport.onMessage.addListener((m) => {
 browser.runtime.onConnect.addListener((p) => {
     p.onMessage.addListener((m) => {
         console.log("test from bkg", m);
-        nativeport.postMessage(m);
+        nativeport.postMessage({
+            "type": "EchoTest",
+            "msg": m.toString(),
+        });
     });
 });
 

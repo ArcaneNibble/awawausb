@@ -253,9 +253,17 @@ impl USBStubEngine {
                 }
                 let msg = msg.expect("failed to read stdin");
 
-                // TODO: Implement stdin handling
-                dbg!(&msg);
-                stdio_unix::write_stdout_msg(&msg).expect("failed to write stdout");
+                let msg = str::from_utf8(&msg).expect("failed to parse message as utf-8");
+                let msg_parsed: protocol::RequestMessage =
+                    serde_json::from_str(&msg).expect("failed to parse message as JSON");
+
+                match msg_parsed {
+                    protocol::RequestMessage::EchoTest { msg } => {
+                        let reply = protocol::ResponseMessage::EchoResponse { msg };
+                        let reply = serde_json::to_string(&reply).unwrap();
+                        write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+                    }
+                }
             } else if kevent.filter == EventFilter::EVFILT_MACHPORT {
                 let mut msg = OpaqueMachMessage::default();
                 let ret = unsafe {
