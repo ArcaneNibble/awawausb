@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::convert::Infallible;
 use std::io;
+use std::mem;
 use std::ptr;
 
 use core_foundation::base::CFRetain;
@@ -165,6 +166,33 @@ impl USBStubEngine {
                 // TODO: Implement stdin handling
                 dbg!(&msg);
                 stdio_unix::write_stdout_msg(&msg).expect("failed to write stdout");
+            } else if kevent.filter == EventFilter::EVFILT_MACHPORT {
+                let mut msg = OpaqueMachMessage::default();
+                let ret = unsafe {
+                    mach_msg(
+                        &mut msg as *mut _,
+                        MACH_RCV_MSG,
+                        0,
+                        mem::size_of::<OpaqueMachMessage>() as u32,
+                        kevent.ident as u32,
+                        0,
+                        0,
+                    )
+                };
+                if ret != 0 {
+                    eprintln!("mach_msg receive failed {:08x}", ret as u32);
+                    continue;
+                }
+
+                unsafe {
+                    // SAFETY: This ends up calling the callbacks,
+                    // which require us to have set everything up perfectly.
+                    IODispatchCalloutFromMessage(
+                        ptr::null(),
+                        &msg as *const _,
+                        self._io_notification_port as *const (),
+                    );
+                }
             } else {
                 dbg!(kevent);
             }
