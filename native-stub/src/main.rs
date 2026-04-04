@@ -12,9 +12,12 @@ use core_foundation::{
 use kqueue_sys::*;
 
 mod macos_sys;
+mod macos_wrap;
 mod stdio_unix;
 
 use macos_sys::*;
+
+use crate::macos_wrap::IOUSBDeviceStruct;
 
 fn get_session_id(obj: io_object_t) -> Option<u64> {
     let sessionid = unsafe {
@@ -244,8 +247,9 @@ impl USBStubEngine {
                 println!("plug session id {:016x}", sessionid);
             }
 
-            let ret = unsafe { IOObjectRelease(item) };
-            assert_eq!(ret, 0);
+            let usb_dev = unsafe { IOUSBDeviceStruct::new(item) };
+            dbg!(&usb_dev);
+            usb_dev.test();
         }
     }
 

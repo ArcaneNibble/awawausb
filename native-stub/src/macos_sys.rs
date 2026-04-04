@@ -1,3 +1,5 @@
+use std::ptr;
+
 use core_foundation::{
     base::{CFAllocatorRef, CFTypeRef},
     dictionary::{CFDictionaryRef, CFMutableDictionaryRef},
@@ -22,6 +24,77 @@ pub struct IONotificationPort {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct CFUUID {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CFUUIDBytes {
+    _b0: u8,
+    _b1: u8,
+    _b2: u8,
+    _b3: u8,
+    _b4: u8,
+    _b5: u8,
+    _b6: u8,
+    _b7: u8,
+    _b8: u8,
+    _b9: u8,
+    _b10: u8,
+    _b11: u8,
+    _b12: u8,
+    _b13: u8,
+    _b14: u8,
+    _b15: u8,
+}
+impl std::fmt::Debug for CFUUIDBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            self._b0,
+            self._b1,
+            self._b2,
+            self._b3,
+            self._b4,
+            self._b5,
+            self._b6,
+            self._b7,
+            self._b8,
+            self._b9,
+            self._b10,
+            self._b11,
+            self._b12,
+            self._b13,
+            self._b14,
+            self._b15,
+        )
+    }
+}
+impl CFUUIDBytes {
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self {
+            _b0: bytes[0],
+            _b1: bytes[1],
+            _b2: bytes[2],
+            _b3: bytes[3],
+            _b4: bytes[4],
+            _b5: bytes[5],
+            _b6: bytes[6],
+            _b7: bytes[7],
+            _b8: bytes[8],
+            _b9: bytes[9],
+            _b10: bytes[10],
+            _b11: bytes[11],
+            _b12: bytes[12],
+            _b13: bytes[13],
+            _b14: bytes[14],
+            _b15: bytes[15],
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[repr(transparent)]
@@ -31,6 +104,175 @@ impl From<io_object_t> for mach_port_t {
         value.0
     }
 }
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Debug)]
+pub struct IOUSBDevRequest {
+    pub bmRequestType: u8,
+    pub bRequest: u8,
+    pub wValue: u16,
+    pub wIndex: u16,
+    pub wLength: u16,
+    pub pData: *mut (),
+    pub wLenDone: u32,
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Debug)]
+pub struct IOUSBDevRequestTO {
+    pub bmRequestType: u8,
+    pub bRequest: u8,
+    pub wValue: u16,
+    pub wIndex: u16,
+    pub wLength: u16,
+    pub pData: *mut (),
+    pub wLenDone: u32,
+    pub noDataTimeout: u32,
+    pub completionTimeout: u32,
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Debug)]
+pub struct IOUSBFindInterfaceRequest {
+    pub bInterfaceClass: u16,
+    pub bInterfaceSubClass: u16,
+    pub bInterfaceProtocol: u16,
+    pub bAlternateSetting: u16,
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Debug)]
+pub struct IUnknown {
+    _reserved: *const (),
+    pub QueryInterface: unsafe extern "C" fn(*const (), CFUUIDBytes, *mut *const ()) -> i32,
+    pub AddRef: unsafe extern "C" fn(*const ()) -> u32,
+    pub Release: unsafe extern "C" fn(*const ()) -> u32,
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Debug)]
+pub struct IOUSBDeviceStruct320 {
+    pub IUnknown: IUnknown,
+    pub CreateDeviceAsyncEventSource:
+        unsafe extern "C" fn(*const (), *mut *const ()) -> kern_return_t,
+    pub GetDeviceAsyncEventSource: unsafe extern "C" fn(*const ()) -> *const (),
+    pub CreateDeviceAsyncPort: unsafe extern "C" fn(*const (), *mut mach_port_t) -> kern_return_t,
+    pub GetDeviceAsyncPort: unsafe extern "C" fn(*const ()) -> mach_port_t,
+    pub USBDeviceOpen: unsafe extern "C" fn(*const ()) -> kern_return_t,
+    pub USBDeviceClose: unsafe extern "C" fn(*const ()) -> kern_return_t,
+    pub GetDeviceClass: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub GetDeviceSubClass: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub GetDeviceProtocol: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub GetDeviceVendor: unsafe extern "C" fn(*const (), *mut u16) -> kern_return_t,
+    pub GetDeviceProduct: unsafe extern "C" fn(*const (), *mut u16) -> kern_return_t,
+    pub GetDeviceReleaseNumber: unsafe extern "C" fn(*const (), *mut u16) -> kern_return_t,
+    pub GetDeviceAddress: unsafe extern "C" fn(*const (), *mut u16) -> kern_return_t,
+    pub GetDeviceBusPowerAvailable: unsafe extern "C" fn(*const (), *mut u32) -> kern_return_t,
+    pub GetDeviceSpeed: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub GetNumberOfConfigurations: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub GetLocationID: unsafe extern "C" fn(*const (), *mut u32) -> kern_return_t,
+    pub GetConfigurationDescriptorPtr:
+        unsafe extern "C" fn(*const (), u8, *mut *const ()) -> kern_return_t,
+    pub GetConfiguration: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub SetConfiguration: unsafe extern "C" fn(*const (), u8) -> kern_return_t,
+    pub GetBusFrameNumber: unsafe extern "C" fn(*const (), *mut u64, *mut u64) -> kern_return_t,
+    pub ResetDevice: unsafe extern "C" fn(*const ()) -> kern_return_t,
+    pub DeviceRequest: unsafe extern "C" fn(*const (), *mut IOUSBDevRequest) -> kern_return_t,
+    pub DeviceRequestAsync: unsafe extern "C" fn(
+        *const (),
+        *const IOUSBDevRequest,
+        extern "C" fn(*const (), kern_return_t, *const ()),
+        *const (),
+    ) -> kern_return_t,
+    pub CreateInterfaceIterator: unsafe extern "C" fn(
+        *const (),
+        *const IOUSBFindInterfaceRequest,
+        *mut io_object_t,
+    ) -> kern_return_t,
+    pub USBDeviceOpenSeize: unsafe extern "C" fn(*const ()) -> kern_return_t,
+    pub DeviceRequestTO: unsafe extern "C" fn(*const (), *mut IOUSBDevRequestTO) -> kern_return_t,
+    pub DeviceRequestAsyncTO: unsafe extern "C" fn(
+        *const (),
+        *const IOUSBDevRequestTO,
+        extern "C" fn(*const (), kern_return_t, *const ()),
+        *const (),
+    ) -> kern_return_t,
+    pub USBDeviceSuspend: unsafe extern "C" fn(*const (), bool) -> kern_return_t,
+    pub USBDeviceAbortPipeZero: unsafe extern "C" fn(*const ()) -> kern_return_t,
+    pub USBGetManufacturerStringIndex: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub USBGetProductStringIndex: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub USBGetSerialNumberStringIndex: unsafe extern "C" fn(*const (), *mut u8) -> kern_return_t,
+    pub USBDeviceReEnumerate: unsafe extern "C" fn(*const (), u32) -> kern_return_t,
+    pub GetBusMicroFrameNumber:
+        unsafe extern "C" fn(*const (), *mut u64, *mut u64) -> kern_return_t,
+    pub GetIOUSBLibVersion: unsafe extern "C" fn(*const (), *mut u32, *mut u32) -> kern_return_t,
+    pub GetBusFrameNumberWithTime:
+        unsafe extern "C" fn(*const (), *mut u64, *mut u64) -> kern_return_t,
+    pub GetUSBDeviceInformation: unsafe extern "C" fn(*const (), *mut u32) -> kern_return_t,
+    pub RequestExtraPower: unsafe extern "C" fn(*const (), u32, u32, *mut u32) -> kern_return_t,
+    pub ReturnExtraPower: unsafe extern "C" fn(*const (), u32, u32) -> kern_return_t,
+    pub GetExtraPowerAllocated: unsafe extern "C" fn(*const (), u32, *mut u32) -> kern_return_t,
+}
+
+#[allow(non_snake_case)]
+pub fn kIOCFPlugInInterfaceID() -> *const CFUUID {
+    unsafe {
+        CFUUIDGetConstantUUIDWithBytes(
+            ptr::null(),
+            0xC2,
+            0x44,
+            0xE8,
+            0x58,
+            0x10,
+            0x9C,
+            0x11,
+            0xD4,
+            0x91,
+            0xD4,
+            0x00,
+            0x50,
+            0xE4,
+            0xC6,
+            0x42,
+            0x6F,
+        )
+    }
+}
+
+#[allow(non_snake_case)]
+pub fn kIOUSBDeviceUserClientTypeID() -> *const CFUUID {
+    unsafe {
+        CFUUIDGetConstantUUIDWithBytes(
+            ptr::null(),
+            0x9d,
+            0xc7,
+            0xb7,
+            0x80,
+            0x9e,
+            0xc0,
+            0x11,
+            0xD4,
+            0xa5,
+            0x4f,
+            0x00,
+            0x0a,
+            0x27,
+            0x05,
+            0x28,
+            0x61,
+        )
+    }
+}
+
+#[allow(non_upper_case_globals)]
+pub const kIOUSBDeviceInterfaceID320: CFUUIDBytes = CFUUIDBytes::new([
+    0x01, 0xA2, 0xD0, 0xE9, 0x42, 0xF6, 0x4A, 0x87, 0x8B, 0x8B, 0x77, 0x05, 0x7C, 0x8C, 0xE0, 0xCE,
+]);
 
 unsafe extern "C" {
     pub fn mach_msg(
@@ -71,4 +313,32 @@ unsafe extern "C" {
         allocator: CFAllocatorRef,
         options: u32,
     ) -> CFTypeRef;
+
+    pub fn IOCreatePlugInInterfaceForService(
+        service: io_object_t,
+        pluginType: *const CFUUID,
+        interfaceType: *const CFUUID,
+        theInterface: *mut *const (),
+        theScore: *mut i32,
+    ) -> kern_return_t;
+
+    pub fn CFUUIDGetConstantUUIDWithBytes(
+        _allocator: *const (),
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+        b: u8,
+    ) -> *const CFUUID;
 }
