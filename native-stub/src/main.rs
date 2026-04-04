@@ -370,11 +370,13 @@ impl USBStubEngine {
 
                         let devices = self.usb_devices.borrow_mut();
                         if let Some(usb_dev) = devices.get(&sid) {
-                            eprintln!("ctrl xfer {:?}", usb_dev);
-
                             // Prepare our transfer object
                             let buf_ptr = buf.as_mut_ptr();
-                            let xfer = Box::new(USBTransfer { dir, txn_id, buf });
+                            let xfer = Box::new(USBTransfer {
+                                dir,
+                                txn_id: txn_id.clone(),
+                                buf,
+                            });
                             let xfer_ptr = Box::into_raw(xfer);
 
                             // Prepare OS transfer object
@@ -398,7 +400,11 @@ impl USBStubEngine {
                                     xfer_ptr as *const (),
                                 )
                             };
-                            eprintln!("ret {} ", ret);
+                            if ret != 0 {
+                                // NOTE: A removed device doesn't seem to generate errors here
+                                eprintln!("ret {:08x} ", ret);
+                                send_error!(txn_id, TransferError);
+                            }
                         } else {
                             send_error!(txn_id, DeviceNotFound);
                         }
