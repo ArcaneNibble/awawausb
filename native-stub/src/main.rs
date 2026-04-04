@@ -10,10 +10,13 @@ use kqueue_sys::*;
 
 mod macos_sys;
 mod macos_wrap;
+mod protocol;
 mod stdio_unix;
 
 use macos_sys::*;
 use macos_wrap::*;
+
+use crate::stdio_unix::write_stdout_msg;
 
 #[derive(Debug)]
 pub struct USBDevice {
@@ -289,7 +292,6 @@ impl USBStubEngine {
     }
 
     extern "C" fn iokit_plug_cb(self_: *const (), iterator: io_object_t) {
-        dbg!("plug!");
         // SAFETY: We passed in self as the arg
         let self_ = unsafe { &*(self_ as *const Self) };
 
@@ -302,7 +304,7 @@ impl USBStubEngine {
 
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
-                println!("plug session id {:016x}", sessionid);
+                eprintln!("plug session id {:016x}", sessionid);
 
                 if let Some(usb_dev) = USBDevice::setup(item) {
                     let mut devices = self_.usb_devices.borrow_mut();
@@ -310,6 +312,13 @@ impl USBStubEngine {
                     if old_dev.is_some() {
                         eprintln!("WARN: Got a duplicate sessionID??");
                     }
+
+                    // Send notification
+                    let notif = protocol::ResponseMessage::NewDevice {
+                        sid: sessionid.to_string(),
+                    };
+                    let notif = serde_json::to_string(&notif).unwrap();
+                    write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
                 } else {
                     eprintln!("WARN: Device setup failed! session = 0x{:x}", sessionid);
                 }
@@ -321,7 +330,6 @@ impl USBStubEngine {
     }
 
     extern "C" fn iokit_unplug_cb(self_: *const (), iterator: io_object_t) {
-        dbg!("unplug!");
         // SAFETY: We passed in self as the arg
         let self_ = unsafe { &*(self_ as *const Self) };
 
@@ -334,13 +342,21 @@ impl USBStubEngine {
 
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
-                println!("unplug session id {:016x}", sessionid);
+                eprintln!("unplug session id {:016x}", sessionid);
 
                 let mut devices = self_.usb_devices.borrow_mut();
                 let dev = devices.remove(&sessionid);
                 if dev.is_none() {
                     eprintln!("WARN: Removing a missing sessionID??");
                 }
+                drop(dev);
+
+                // Send notification
+                let notif = protocol::ResponseMessage::UnplugDevice {
+                    sid: sessionid.to_string(),
+                };
+                let notif = serde_json::to_string(&notif).unwrap();
+                write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
             } else {
                 eprintln!("WARN: Got something without a sessionID??");
             }

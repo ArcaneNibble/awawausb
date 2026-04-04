@@ -8,4 +8,6 @@ core-foundation = "0.10"
 kqueue-sys = "1.0"
 libc = "0.2"
 pin-init = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 usb-ch9 = { path = "../usb-ch9" }
