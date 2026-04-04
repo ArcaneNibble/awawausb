@@ -1,0 +1,36 @@
+{
+  "manifest_version": 2,
+  "name": "awawausb",
+  "version": "0.0",
+
+  "description": "test",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "awawausb@arcanenibble.com"
+    }
+  },
+
+  "content_scripts": [
+    {
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN",
+      "matches": ["<all_urls>"],
+      "js": ["page.js"]
+    }, {
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+
+  "background": {
+    "scripts": ["awawausb.js"],
+    "persistent": true
+  },
+
+  "permissions": ["nativeMessaging"]
+}
