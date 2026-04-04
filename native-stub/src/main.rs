@@ -341,38 +341,21 @@ impl USBStubEngine {
 
                 let devices = self.usb_devices.borrow_mut();
                 if let Some(usb_dev) = devices.get(&sid) {
-                    // Prepare our transfer object
-                    let buf_ptr = buf.as_mut_ptr();
-                    let xfer = Box::new(USBTransfer {
+                    let xfer = USBTransfer {
                         dir,
                         txn_id: txn_id.clone(),
                         buf,
-                    });
-                    let xfer_ptr = Box::into_raw(xfer);
-
-                    // Prepare OS transfer object
-                    let mut req = IOUSBDevRequestTO {
-                        bmRequestType: request_type,
-                        bRequest: request,
-                        wValue: value,
-                        wIndex: index,
-                        wLength: len as u16,
-                        pData: buf_ptr as *mut (),
-                        wLenDone: 0,
-                        noDataTimeout: timeout as u32,
-                        completionTimeout: timeout as u32,
                     };
 
-                    log::debug!("control transfer, txn = {}, xfer = {:x?}", txn_id, req);
-                    let ret = unsafe {
-                        ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
-                            usb_dev._macos.0 as *const (),
-                            &mut req,
-                            Self::iokit_usb_completion,
-                            xfer_ptr as *const (),
-                        )
-                    };
-                    if ret != 0 {
+                    if let Err(ret) = usb_dev._macos.ctrl_xfer(
+                        xfer,
+                        request_type,
+                        request,
+                        value,
+                        index,
+                        len as u16,
+                        timeout as u32,
+                    ) {
                         // NOTE: A removed device doesn't seem to generate errors here
                         log::warn!(
                             "DeviceRequestAsyncTO failed, txn = {}, ret = {:08x} ",

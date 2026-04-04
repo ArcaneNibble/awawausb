@@ -204,6 +204,57 @@ impl IOUSBDeviceStruct {
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
 
+    pub fn ctrl_xfer(
+        &self,
+        mut xfer_obj: crate::USBTransfer,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        length: u16,
+        timeout: u32,
+    ) -> Result<(), kern_return_t> {
+        log::debug!(
+            "control transfer, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+            xfer_obj.txn_id,
+            request_type,
+            request,
+            value,
+            index,
+            length,
+            xfer_obj.buf
+        );
+
+        // Prepare our object, which is a Box on the heap so that it doesn't move
+        assert!(length as usize <= xfer_obj.buf.capacity());
+        let buf_ptr = xfer_obj.buf.as_mut_ptr();
+        let xfer_ptr = Box::into_raw(Box::new(xfer_obj));
+
+        // Prepare OS transfer object
+        let req = IOUSBDevRequestTO {
+            bmRequestType: request_type,
+            bRequest: request,
+            wValue: value,
+            wIndex: index,
+            wLength: length,
+            pData: buf_ptr as *mut (),
+            wLenDone: 0,
+            noDataTimeout: timeout as u32,
+            completionTimeout: timeout as u32,
+        };
+
+        // Submit transfer
+        let ret = unsafe {
+            ((**self.0).DeviceRequestAsyncTO)(
+                self.0 as *const (),
+                &req,
+                crate::USBStubEngine::iokit_usb_completion,
+                xfer_ptr as *const (),
+            )
+        };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+
     pub fn test(&self) {
         let mut lib_ver = 0;
         let mut fam_ver = 0;
