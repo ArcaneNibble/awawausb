@@ -1,14 +1,11 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::mem;
 use std::ptr;
 
-use core_foundation::{
-    base::{CFRetain, CFType, FromVoid, TCFType},
-    number::CFNumber,
-    string::CFString,
-};
+use core_foundation::base::CFRetain;
 use kqueue_sys::*;
 
 mod macos_sys;
@@ -16,32 +13,18 @@ mod macos_wrap;
 mod stdio_unix;
 
 use macos_sys::*;
+use macos_wrap::*;
 
-use crate::macos_wrap::IOUSBDeviceStruct;
-
-fn get_session_id(obj: io_object_t) -> Option<u64> {
-    let sessionid = unsafe {
-        IORegistryEntryCreateCFProperty(
-            obj,
-            CFString::from_static_string("sessionID").as_CFTypeRef() as *const _,
-            ptr::null(),
-            0,
-        )
-    };
-
-    if !sessionid.is_null() {
-        let sessionid = unsafe { CFType::from_void(sessionid) };
-        if let Some(sessionid) = sessionid.downcast::<CFNumber>() {
-            if let Some(sessionid) = sessionid.to_i64() {
-                return Some(sessionid as u64);
-            }
-        }
-    }
-    None
+#[derive(Debug)]
+pub struct USBDevice {
+    _macos: IOUSBDeviceStruct,
 }
 
 /// Main struct holding all of the state for our operations
+#[derive(Debug)]
 pub struct USBStubEngine {
+    usb_devices: RefCell<HashMap<u64, USBDevice>>,
+
     kqueue: i32,
     kevents_buf: RefCell<Vec<kevent>>,
     // The following only need to be held on to, we don't touch them
@@ -138,8 +121,9 @@ impl USBStubEngine {
         // SAFETY: Make sure we set everything
         unsafe {
             (*v).kqueue = kq;
-            // SAFETY: Don't drop uninit buf
+            // SAFETY: Don't drop uninit objects
             // (but others are okay, no drop impl)
+            ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
             ptr::addr_of_mut!((*v).kevents_buf).write(RefCell::new(kevents_buf));
             (*v)._io_notification_port = io_notif_port;
             (*v)._plug_notifications = plug_notifications;
@@ -233,7 +217,6 @@ impl USBStubEngine {
         dbg!("plug!");
         // SAFETY: We passed in self as the arg
         let self_ = unsafe { &*(self_ as *const Self) };
-        dbg!(self_.kqueue);
 
         let mut item;
         loop {
@@ -245,11 +228,22 @@ impl USBStubEngine {
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
                 println!("plug session id {:016x}", sessionid);
-            }
 
-            let usb_dev = unsafe { IOUSBDeviceStruct::new(item) };
-            dbg!(&usb_dev);
-            usb_dev.test();
+                let usb_dev = unsafe { IOUSBDeviceStruct::new(item) };
+                dbg!(&usb_dev);
+                usb_dev.test();
+
+                let usb_dev = USBDevice { _macos: usb_dev };
+
+                let mut devices = self_.usb_devices.borrow_mut();
+                let old_dev = devices.insert(sessionid, usb_dev);
+                if old_dev.is_some() {
+                    eprintln!("WARN: Got a duplicate sessionID??");
+                }
+            } else {
+                eprintln!("WARN: Got something without a sessionID??");
+                unsafe { IOObjectRelease(item) };
+            }
         }
     }
 
@@ -257,7 +251,6 @@ impl USBStubEngine {
         dbg!("unplug!");
         // SAFETY: We passed in self as the arg
         let self_ = unsafe { &*(self_ as *const Self) };
-        dbg!(self_.kqueue);
 
         let mut item;
         loop {
@@ -269,6 +262,14 @@ impl USBStubEngine {
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
                 println!("unplug session id {:016x}", sessionid);
+
+                let mut devices = self_.usb_devices.borrow_mut();
+                let dev = devices.remove(&sessionid);
+                if dev.is_none() {
+                    eprintln!("WARN: Removing a missing sessionID??");
+                }
+            } else {
+                eprintln!("WARN: Got something without a sessionID??");
             }
 
             let ret = unsafe { IOObjectRelease(item) };
@@ -298,5 +299,6 @@ fn main() {
     let state = state.as_ref();
     while state.run_loop() {}
 
+    dbg!(state);
     eprintln!("zzz");
 }

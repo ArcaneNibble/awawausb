@@ -1,6 +1,33 @@
 use std::ptr;
 
+use core_foundation::{
+    base::{CFType, FromVoid, TCFType},
+    number::CFNumber,
+    string::CFString,
+};
+
 use super::macos_sys::*;
+
+pub fn get_session_id(obj: io_object_t) -> Option<u64> {
+    let sessionid = unsafe {
+        IORegistryEntryCreateCFProperty(
+            obj,
+            CFString::from_static_string("sessionID").as_CFTypeRef() as *const _,
+            ptr::null(),
+            0,
+        )
+    };
+
+    if !sessionid.is_null() {
+        let sessionid = unsafe { CFType::from_void(sessionid) };
+        if let Some(sessionid) = sessionid.downcast::<CFNumber>() {
+            if let Some(sessionid) = sessionid.to_i64() {
+                return Some(sessionid as u64);
+            }
+        }
+    }
+    None
+}
 
 #[derive(Debug)]
 pub struct IOUSBDeviceStruct(*mut *const IOUSBDeviceStruct320);
