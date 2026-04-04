@@ -297,7 +297,7 @@ impl USBStubEngine {
                 if let Err(e) = &msg
                     && e.kind() == io::ErrorKind::UnexpectedEof
                 {
-                    eprintln!("Goodbye!");
+                    log::debug!("EOF on stdin, goodbye!");
                     return false;
                 }
                 let msg = msg.expect("failed to read stdin");
@@ -392,6 +392,7 @@ impl USBStubEngine {
                                 completionTimeout: timeout as u32,
                             };
 
+                            log::debug!("control transfer, txn = {}, xfer = {:x?}", txn_id, req);
                             let ret = unsafe {
                                 ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
                                     usb_dev._macos.0 as *const (),
@@ -402,7 +403,11 @@ impl USBStubEngine {
                             };
                             if ret != 0 {
                                 // NOTE: A removed device doesn't seem to generate errors here
-                                eprintln!("ret {:08x} ", ret);
+                                log::warn!(
+                                    "DeviceRequestAsyncTO failed, txn = {}, ret = {:08x} ",
+                                    txn_id,
+                                    ret
+                                );
                                 send_error!(txn_id, TransferError);
                             }
                         } else {
@@ -427,7 +432,7 @@ impl USBStubEngine {
                 // It probably just means that we tried to process a lingering callbacks
                 // for a device which was unplugged and that we already closed.
                 if ret != 0 && ret != MACH_RCV_INVALID_NAME {
-                    eprintln!("mach_msg receive failed {:08x}", ret as u32);
+                    log::warn!("mach_msg receive failed {:08x}", ret as u32);
                     continue;
                 }
 
@@ -441,7 +446,7 @@ impl USBStubEngine {
                     );
                 }
             } else {
-                dbg!(kevent);
+                log::warn!("Unknown kqueue event {:?}", kevent);
             }
         }
 
@@ -461,13 +466,13 @@ impl USBStubEngine {
 
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
-                eprintln!("plug session id {:016x}", sessionid);
+                log::debug!("plug, session = 0x{:x}", sessionid);
 
                 if let Some(usb_dev) = USBDevice::setup(item, self_) {
                     let mut devices = self_.usb_devices.borrow_mut();
                     let old_dev = devices.insert(sessionid, usb_dev);
                     if old_dev.is_some() {
-                        eprintln!("WARN: Got a duplicate sessionID??");
+                        log::warn!("Got a duplicate sessionID?? 0x{:x}", sessionid);
                     }
 
                     // Send notification
@@ -477,10 +482,10 @@ impl USBStubEngine {
                     let notif = serde_json::to_string(&notif).unwrap();
                     write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
                 } else {
-                    eprintln!("WARN: Device setup failed! session = 0x{:x}", sessionid);
+                    log::warn!("Device setup failed! session = 0x{:x}", sessionid);
                 }
             } else {
-                eprintln!("WARN: Got something without a sessionID??");
+                log::warn!("Got plug notification without a sessionID??");
                 unsafe { IOObjectRelease(item) };
             }
         }
@@ -499,12 +504,12 @@ impl USBStubEngine {
 
             let sessionid = get_session_id(item);
             if let Some(sessionid) = sessionid {
-                eprintln!("unplug session id {:016x}", sessionid);
+                log::debug!("unplug, session = 0x{:x}", sessionid);
 
                 let mut devices = self_.usb_devices.borrow_mut();
                 let dev = devices.remove(&sessionid);
                 if dev.is_none() {
-                    eprintln!("WARN: Removing a missing sessionID??");
+                    log::warn!("Removing a sessionID we don't have?? 0x{:x}", sessionid);
                 }
                 drop(dev);
 
@@ -515,7 +520,7 @@ impl USBStubEngine {
                 let notif = serde_json::to_string(&notif).unwrap();
                 write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
             } else {
-                eprintln!("WARN: Got something without a sessionID??");
+                log::warn!("Got unplug notification without a sessionID??");
             }
 
             let ret = unsafe { IOObjectRelease(item) };
@@ -587,7 +592,7 @@ impl USBStubEngine {
             let notif = serde_json::to_string(&notif).unwrap();
             write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
         } else {
-            eprintln!("cb done err {:08x}", result);
+            log::debug!("request {} finished with err {:08x}", xfer.txn_id, result);
             let notif = protocol::ResponseMessage::RequestError {
                 txn_id: xfer.txn_id,
                 error: protocol::Errors::TransferError,
@@ -611,7 +616,11 @@ impl Drop for USBStubEngine {
 }
 
 fn main() {
-    eprintln!("Hello, world!");
+    stderrlog::new()
+        .verbosity(log::Level::Debug)
+        .init()
+        .unwrap();
+    log::info!("awawausb stub starting!");
 
     pin_init::init_stack!(state = USBStubEngine::init());
     let state = state.unwrap();
@@ -621,5 +630,5 @@ fn main() {
     let state = state.as_ref();
     while state.run_loop() {}
 
-    eprintln!("zzz");
+    log::info!("awawausb stub exiting!");
 }

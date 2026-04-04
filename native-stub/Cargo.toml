@@ -8,6 +8,8 @@ base64 = "0.22"
 core-foundation = "0.10"
 kqueue-sys = "1.0"
 libc = "0.2"
+log = "0.4"
+stderrlog = "0.6"
 pin-init = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
