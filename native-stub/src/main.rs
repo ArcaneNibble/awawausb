@@ -20,6 +20,33 @@ use macos_sys::*;
 use macos_wrap::*;
 use stdio_unix::*;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum USBTransferDirection {
+    HostToDevice,
+    DeviceToHost,
+}
+
+/// A USB transfer which is currently in-flight
+///
+/// This would usually be called an "URB" (USB Request Block).
+///
+/// When the transfer has been submitted, this struct is "owned by"
+/// the operating system. We reclaim ownership when we get a completion.
+#[derive(Debug)]
+pub struct USBTransfer {
+    dir: USBTransferDirection,
+    txn_id: String,
+    /// The payload buffer
+    ///
+    /// If sending data _to_ the device, this buffer contains the data.
+    /// If receiving data _from_ the device, this buffer must have
+    /// a capacity large enough to hold the desired length.
+    ///
+    /// The kernel _may write_ to this buffer during the time we've
+    /// given up ownership
+    buf: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct USBDevice {
     pub device_descriptor: usb_ch9::ch9_core::DeviceDescriptor,
@@ -309,17 +336,20 @@ impl USBStubEngine {
                     } => {
                         // Deal with data
                         let mut txn_ok = false;
+                        let mut dir = USBTransferDirection::HostToDevice;
                         let mut buf = Vec::new();
                         let mut len = 0;
                         if request_type & usb_ch9::ch9_core::REQ_DIR_D2H != 0 {
                             if length.is_some() && data.is_none() {
                                 txn_ok = true;
+                                dir = USBTransferDirection::DeviceToHost;
                                 len = length.unwrap() as usize;
                                 buf = Vec::with_capacity(len);
                             }
                         } else {
                             if data.is_some() && length.is_none() {
                                 txn_ok = true;
+                                dir = USBTransferDirection::HostToDevice;
                                 buf = URL_SAFE_NO_PAD
                                     .decode(&data.unwrap())
                                     .expect("base64 decode error");
@@ -341,9 +371,13 @@ impl USBStubEngine {
                         let devices = self.usb_devices.borrow_mut();
                         if let Some(usb_dev) = devices.get(&sid) {
                             eprintln!("ctrl xfer {:?}", usb_dev);
-                            // TODO do it for real
+
+                            // Prepare our transfer object
                             let buf_ptr = buf.as_mut_ptr();
-                            std::mem::forget(buf);
+                            let xfer = Box::new(USBTransfer { dir, txn_id, buf });
+                            let xfer_ptr = Box::into_raw(xfer);
+
+                            // Prepare OS transfer object
                             let mut req = IOUSBDevRequestTO {
                                 bmRequestType: request_type,
                                 bRequest: request,
@@ -360,8 +394,8 @@ impl USBStubEngine {
                                 ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
                                     usb_dev._macos.0 as *const (),
                                     &mut req,
-                                    Self::async_cb_test,
-                                    buf_ptr as *const (),
+                                    Self::iokit_usb_completion,
+                                    xfer_ptr as *const (),
                                 )
                             };
                             eprintln!("ret {} ", ret);
@@ -507,13 +541,25 @@ impl USBStubEngine {
         Ok(())
     }
 
-    extern "C" fn async_cb_test(refcon: *const (), result: libc::kern_return_t, arg0: *const ()) {
+    extern "C" fn iokit_usb_completion(
+        refcon: *const (),
+        result: libc::kern_return_t,
+        arg0: *const (),
+    ) {
+        // Recover ownership of the transfer
+        // SAFETY: This was previously allocated via Box
+        let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransfer) };
+
         let actual_len = arg0 as usize;
-        let buf_vec = unsafe { Vec::from_raw_parts(refcon as *mut u8, actual_len, 4) };
-        eprintln!(
-            "cb done! ret {:08x} len {} data {:x?}",
-            result as u32, actual_len, buf_vec
-        );
+        if xfer.dir == USBTransferDirection::DeviceToHost {
+            // Update the size of received data
+            unsafe {
+                xfer.buf.set_len(actual_len);
+            }
+        }
+        eprintln!("cb done! ret {:08x} xfer {:x?}", result as u32, xfer);
+
+        // n.b. the xfer will now be deallocated automagically
     }
 }
 impl Drop for USBStubEngine {
