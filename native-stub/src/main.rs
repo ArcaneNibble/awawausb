@@ -263,6 +263,44 @@ impl USBStubEngine {
                         let reply = serde_json::to_string(&reply).unwrap();
                         write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
                     }
+                    protocol::RequestMessage::ControlTransfer {
+                        sid,
+                        txn_id,
+                        request_type,
+                        request,
+                        value,
+                        index,
+                        data,
+                        length,
+                        _timeout_internal,
+                    } => {
+                        let mut txn_ok = false;
+                        if request_type & usb_ch9::ch9_core::REQ_DIR_D2H != 0 {
+                            if length.is_some() && data.is_none() {
+                                txn_ok = true;
+                            }
+                        } else {
+                            if data.is_some() && length.is_none() {
+                                txn_ok = true;
+                            }
+                        }
+                        assert!(txn_ok, "received malformed request");
+
+                        let sid = sid.parse::<u64>().expect("received malformed request");
+
+                        let devices = self.usb_devices.borrow_mut();
+                        if let Some(usb_dev) = devices.get(&sid) {
+                            // TODO
+                            eprintln!("ctrl xfer {:?}", usb_dev);
+                        } else {
+                            let reply = protocol::ResponseMessage::RequestError {
+                                txn_id,
+                                error: protocol::Errors::DeviceNotFound,
+                            };
+                            let reply = serde_json::to_string(&reply).unwrap();
+                            write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+                        }
+                    }
                 }
             } else if kevent.filter == EventFilter::EVFILT_MACHPORT {
                 let mut msg = OpaqueMachMessage::default();
