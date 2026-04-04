@@ -17,8 +17,7 @@ mod stdio_unix;
 
 use macos_sys::*;
 use macos_wrap::*;
-
-use crate::stdio_unix::write_stdout_msg;
+use stdio_unix::*;
 
 #[derive(Debug)]
 pub struct USBDevice {
@@ -269,7 +268,7 @@ impl USBStubEngine {
 
         for kevent in kevents_buf.iter() {
             if kevent.ident == 0 && kevent.filter == EventFilter::EVFILT_READ {
-                let msg = stdio_unix::read_stdin_msg();
+                let msg = read_stdin_msg();
                 if let Err(e) = &msg
                     && e.kind() == io::ErrorKind::UnexpectedEof
                 {
@@ -315,8 +314,30 @@ impl USBStubEngine {
 
                         let devices = self.usb_devices.borrow_mut();
                         if let Some(usb_dev) = devices.get(&sid) {
-                            // TODO
                             eprintln!("ctrl xfer {:?}", usb_dev);
+                            // TODO do it for real
+                            let mut buf = Vec::<u8>::with_capacity(4);
+                            let buf_ptr = buf.as_mut_ptr();
+                            std::mem::forget(buf);
+                            let mut req = IOUSBDevRequest {
+                                bmRequestType: 0xC0,
+                                bRequest: b'e',
+                                wValue: 0,
+                                wIndex: 0,
+                                wLength: 4,
+                                pData: buf_ptr as *mut (),
+                                wLenDone: 0,
+                            };
+
+                            let ret = unsafe {
+                                ((**usb_dev._macos.0).DeviceRequestAsync)(
+                                    usb_dev._macos.0 as *const (),
+                                    &mut req,
+                                    Self::async_cb_test,
+                                    buf_ptr as *const (),
+                                )
+                            };
+                            eprintln!("ret {} ", ret);
                         } else {
                             let reply = protocol::ResponseMessage::RequestError {
                                 txn_id,
@@ -340,7 +361,10 @@ impl USBStubEngine {
                         0,
                     )
                 };
-                if ret != 0 {
+                // Ignore MACH_RCV_INVALID_NAME
+                // It probably just means that we tried to process a lingering callbacks
+                // for a device which was unplugged and that we already closed.
+                if ret != 0 && ret != MACH_RCV_INVALID_NAME {
                     eprintln!("mach_msg receive failed {:08x}", ret as u32);
                     continue;
                 }
@@ -460,6 +484,15 @@ impl USBStubEngine {
 
         Ok(())
     }
+
+    extern "C" fn async_cb_test(refcon: *const (), result: libc::kern_return_t, arg0: *const ()) {
+        let actual_len = arg0 as usize;
+        let buf_vec = unsafe { Vec::from_raw_parts(refcon as *mut u8, actual_len, 4) };
+        eprintln!(
+            "cb done! ret {:08x} len {} data {:x?}",
+            result as u32, actual_len, buf_vec
+        );
+    }
 }
 impl Drop for USBStubEngine {
     fn drop(&mut self) {
@@ -483,6 +516,5 @@ fn main() {
     let state = state.as_ref();
     while state.run_loop() {}
 
-    dbg!(state);
     eprintln!("zzz");
 }

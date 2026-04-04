@@ -18,6 +18,7 @@ impl Default for OpaqueMachMessage {
 }
 
 pub const MACH_RCV_MSG: libc::c_int = 0x0000_0002;
+pub const MACH_RCV_INVALID_NAME: kern_return_t = 0x10004002;
 
 #[repr(C)]
 pub struct IONotificationPort {

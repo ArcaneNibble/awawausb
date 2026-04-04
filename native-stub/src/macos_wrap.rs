@@ -94,7 +94,7 @@ pub fn get_session_id(obj: io_object_t) -> Option<u64> {
 
 #[derive(Debug)]
 pub struct IOUSBDeviceStruct(
-    *mut *const IOUSBDeviceStruct320,
+    pub(crate) *mut *const IOUSBDeviceStruct320,
     pub(crate) *const Cell<usize>,
 );
 #[allow(non_snake_case)]
