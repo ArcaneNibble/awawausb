@@ -1,3 +1,5 @@
+//! JSON-based protocol for talking with the browser extension
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]

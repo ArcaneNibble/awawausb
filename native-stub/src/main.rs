@@ -13,7 +13,7 @@ use kqueue_sys::*;
 
 mod macos_sys;
 mod macos_wrap;
-mod protocol;
+pub mod protocol;
 mod stdio_unix;
 
 use macos_sys::*;
@@ -34,8 +34,8 @@ pub enum USBTransferDirection {
 /// the operating system. We reclaim ownership when we get a completion.
 #[derive(Debug)]
 pub struct USBTransfer {
-    dir: USBTransferDirection,
-    txn_id: String,
+    pub dir: USBTransferDirection,
+    pub txn_id: String,
     /// The payload buffer
     ///
     /// If sending data _to_ the device, this buffer contains the data.
@@ -44,9 +44,13 @@ pub struct USBTransfer {
     ///
     /// The kernel _may write_ to this buffer during the time we've
     /// given up ownership
-    buf: Vec<u8>,
+    pub buf: Vec<u8>,
 }
 
+/// Handle for a USB device
+///
+/// May or may not be opened. Holds OS-specific handle,
+/// as well as generic metadata (i.e. descriptors, strings).
 #[derive(Debug)]
 pub struct USBDevice {
     pub device_descriptor: usb_ch9::ch9_core::DeviceDescriptor,
