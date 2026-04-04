@@ -1,1 +1,4 @@
 native-stub/target
+
+usb-ch9/target
+usb-ch9/Cargo.lock
