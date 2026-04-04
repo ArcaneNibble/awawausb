@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ptr;
 
 use core_foundation::{
@@ -5,7 +6,7 @@ use core_foundation::{
     number::CFNumber,
     string::CFString,
 };
-use libc::kern_return_t;
+use libc::{kern_return_t, mach_port_t};
 
 use super::macos_sys::*;
 
@@ -92,7 +93,10 @@ pub fn get_session_id(obj: io_object_t) -> Option<u64> {
 }
 
 #[derive(Debug)]
-pub struct IOUSBDeviceStruct(*mut *const IOUSBDeviceStruct320);
+pub struct IOUSBDeviceStruct(
+    *mut *const IOUSBDeviceStruct320,
+    pub(crate) *const Cell<usize>,
+);
 #[allow(non_snake_case)]
 impl IOUSBDeviceStruct {
     /// Turns an IOKit io_object_t into a USB device interface
@@ -131,10 +135,15 @@ impl IOUSBDeviceStruct {
             ((*plugin_iunk).Release)(iokit_plugin);
             IOObjectRelease(obj);
 
-            Self(device as *mut *const IOUSBDeviceStruct320)
+            Self(device as *mut *const IOUSBDeviceStruct320, ptr::null())
         }
     }
 
+    pub fn CreateDeviceAsyncPort(&self) -> Result<mach_port_t, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).CreateDeviceAsyncPort)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
     pub fn GetDeviceClass(&self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceClass)(self.0 as *const (), &mut out) };
@@ -245,6 +254,11 @@ impl Drop for IOUSBDeviceStruct {
     fn drop(&mut self) {
         unsafe {
             ((**self.0).IUnknown.Release)(self.0 as *const ());
+            if !self.1.is_null() {
+                // Decrement needed event count
+                let needed_events = &*self.1;
+                needed_events.update(|x| x - 1);
+            }
         }
     }
 }

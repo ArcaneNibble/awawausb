@@ -1,8 +1,10 @@
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::mem;
+use std::pin::Pin;
 use std::ptr;
 
 use core_foundation::base::CFRetain;
@@ -29,7 +31,7 @@ pub struct USBDevice {
 }
 impl USBDevice {
     #[allow(non_snake_case)]
-    pub fn setup(obj: io_object_t) -> Option<Self> {
+    pub fn setup(obj: io_object_t, engine: Pin<&USBStubEngine>) -> Option<Self> {
         // These are available in IOKit, but not on the interface API.
         // None of these gets (here or below) should ever fail on versions of macOS we support
         // (but, as a hack, we ignore failures here to avoid leaking the object).
@@ -41,7 +43,14 @@ impl USBDevice {
         let str_sn = get_usb_cached_string(obj, "USB Serial Number");
 
         // Ownership is actually converted here
-        let usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
+        let mut usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
+
+        // Create async event notification
+        let mach_port = usb_dev.CreateDeviceAsyncPort().ok()?;
+        eprintln!("async mach port {}", mach_port);
+        engine.add_mach_port(mach_port).ok()?;
+        eprintln!("added mach port ok");
+        usb_dev.1 = &engine.actual_needed_event_sz;
 
         // Get device descriptor fields
         let bDeviceClass = usb_dev.GetDeviceClass().ok()?;
@@ -103,6 +112,10 @@ impl USBDevice {
 pub struct USBStubEngine {
     usb_devices: RefCell<HashMap<u64, USBDevice>>,
 
+    // As we watch more things, we make the event buffer bigger.
+    // But we never make it smaller, so this field keeps track of
+    // how many events we _actually_ need.
+    actual_needed_event_sz: Cell<usize>,
     kqueue: i32,
     kevents_buf: RefCell<Vec<kevent>>,
     // The following only need to be held on to, we don't touch them
@@ -199,6 +212,7 @@ impl USBStubEngine {
         // SAFETY: Make sure we set everything
         unsafe {
             (*v).kqueue = kq;
+            (*v).actual_needed_event_sz = Cell::new(all_kevents.len());
             // SAFETY: Don't drop uninit objects
             // (but others are okay, no drop impl)
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
@@ -221,9 +235,20 @@ impl USBStubEngine {
     }
 
     /// Run one loop. Returns true if we should continue
-    pub fn run_loop(&self) -> bool {
+    pub fn run_loop(self: Pin<&Self>) -> bool {
         // Poll for events
         let mut kevents_buf = self.kevents_buf.borrow_mut();
+
+        // If we need to, grow the event buffer.
+        // We have to do the grow here, and *NOT* immediately when adding new things to watch,
+        // because new items get added while we are still iterating over the buffer.
+        let needed_events = self.actual_needed_event_sz.get();
+        if kevents_buf.capacity() < needed_events {
+            let to_reserve = needed_events - kevents_buf.len();
+            kevents_buf.reserve(to_reserve);
+        }
+        dbg!(needed_events, kevents_buf.capacity());
+
         unsafe {
             let nevents = kqueue_sys::kevent(
                 self.kqueue,
@@ -338,8 +363,8 @@ impl USBStubEngine {
     }
 
     extern "C" fn iokit_plug_cb(self_: *const (), iterator: io_object_t) {
-        // SAFETY: We passed in self as the arg
-        let self_ = unsafe { &*(self_ as *const Self) };
+        // SAFETY: We passed in self as the arg, and we init as pinned
+        let self_ = unsafe { Pin::new_unchecked(&*(self_ as *const Self)) };
 
         let mut item;
         loop {
@@ -352,7 +377,7 @@ impl USBStubEngine {
             if let Some(sessionid) = sessionid {
                 eprintln!("plug session id {:016x}", sessionid);
 
-                if let Some(usb_dev) = USBDevice::setup(item) {
+                if let Some(usb_dev) = USBDevice::setup(item, self_) {
                     let mut devices = self_.usb_devices.borrow_mut();
                     let old_dev = devices.insert(sessionid, usb_dev);
                     if old_dev.is_some() {
@@ -376,8 +401,8 @@ impl USBStubEngine {
     }
 
     extern "C" fn iokit_unplug_cb(self_: *const (), iterator: io_object_t) {
-        // SAFETY: We passed in self as the arg
-        let self_ = unsafe { &*(self_ as *const Self) };
+        // SAFETY: We passed in self as the arg, and we init as pinned
+        let self_ = unsafe { Pin::new_unchecked(&*(self_ as *const Self)) };
 
         let mut item;
         loop {
@@ -410,6 +435,30 @@ impl USBStubEngine {
             let ret = unsafe { IOObjectRelease(item) };
             assert_eq!(ret, 0);
         }
+    }
+
+    /// Start watching a new Mach port
+    ///
+    /// Implicitly incrememnts actual_needed_event_sz
+    pub fn add_mach_port(&self, mach_port: libc::mach_port_t) -> io::Result<()> {
+        // Register the port in kqueue
+        let kevent_new = kqueue_sys::kevent::new(
+            mach_port as usize,
+            kqueue_sys::EventFilter::EVFILT_MACHPORT,
+            kqueue_sys::EventFlag::EV_ADD,
+            kqueue_sys::FilterFlag::empty(),
+        );
+        let ret = unsafe {
+            kqueue_sys::kevent(self.kqueue, &kevent_new, 1, ptr::null_mut(), 0, ptr::null())
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Bump the buffer size
+        self.actual_needed_event_sz.update(|x| x + 1);
+
+        Ok(())
     }
 }
 impl Drop for USBStubEngine {
