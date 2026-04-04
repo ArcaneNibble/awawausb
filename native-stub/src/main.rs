@@ -17,7 +17,82 @@ use macos_wrap::*;
 
 #[derive(Debug)]
 pub struct USBDevice {
+    pub device_descriptor: usb_ch9::ch9_core::DeviceDescriptor,
+    pub config_descriptors: Vec<Vec<u8>>,
+    pub vendor_name: Option<String>,
+    pub product_name: Option<String>,
+    pub serial_number: Option<String>,
     _macos: IOUSBDeviceStruct,
+}
+impl USBDevice {
+    #[allow(non_snake_case)]
+    pub fn setup(obj: io_object_t) -> Option<Self> {
+        // These are available in IOKit, but not on the interface API.
+        // None of these gets (here or below) should ever fail on versions of macOS we support
+        // (but, as a hack, we ignore failures here to avoid leaking the object).
+        let bcdUSB = get_bcd_usb(obj).unwrap_or_default();
+        let bMaxPacketSize0 = get_max_pkt_0(obj).unwrap_or_default();
+
+        let str_manuf = get_usb_cached_string(obj, "USB Vendor Name");
+        let str_product = get_usb_cached_string(obj, "USB Product Name");
+        let str_sn = get_usb_cached_string(obj, "USB Serial Number");
+
+        // Ownership is actually converted here
+        let usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
+
+        // Get device descriptor fields
+        let bDeviceClass = usb_dev.GetDeviceClass().ok()?;
+        let bDeviceSubClass = usb_dev.GetDeviceSubClass().ok()?;
+        let bDeviceProtocol = usb_dev.GetDeviceProtocol().ok()?;
+        let idVendor = usb_dev.GetDeviceVendor().ok()?;
+        let idProduct = usb_dev.GetDeviceProduct().ok()?;
+        let bcdDevice = usb_dev.GetDeviceReleaseNumber().ok()?;
+        let iManufacturer = usb_dev.USBGetManufacturerStringIndex().ok()?;
+        let iProduct = usb_dev.USBGetProductStringIndex().ok()?;
+        let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex().ok()?;
+        let bNumConfigurations = usb_dev.GetNumberOfConfigurations().ok()?;
+
+        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor {
+            bLength: std::mem::size_of::<usb_ch9::ch9_core::DeviceDescriptor>() as u8,
+            bDescriptorType: usb_ch9::ch9_core::descriptor_types::DEVICE,
+            bcdUSB,
+            bDeviceClass,
+            bDeviceSubClass,
+            bDeviceProtocol,
+            bMaxPacketSize0,
+            idVendor,
+            idProduct,
+            bcdDevice,
+            iManufacturer,
+            iProduct,
+            iSerialNumber,
+            bNumConfigurations,
+        };
+
+        // Get configuration descriptors
+        let mut config_descs = Vec::new();
+        for i in 0..bNumConfigurations {
+            let conf_desc = usb_dev.GetConfigurationDescriptorPtr(i).ok()?;
+
+            // SAFETY: We read the initial configuration descriptor and then use its length
+            // (which is what everybody just has to do here)
+            let cfg_desc_initial = conf_desc as *const usb_ch9::ch9_core::ConfigDescriptor;
+            let total_desc_len = unsafe { (*cfg_desc_initial).wTotalLength as usize };
+            let config_desc =
+                unsafe { std::slice::from_raw_parts(conf_desc as *const u8, total_desc_len) };
+
+            config_descs.push(config_desc.to_owned());
+        }
+
+        Some(USBDevice {
+            device_descriptor: dev_desc,
+            config_descriptors: config_descs,
+            vendor_name: str_manuf,
+            product_name: str_product,
+            serial_number: str_sn,
+            _macos: usb_dev,
+        })
+    }
 }
 
 /// Main struct holding all of the state for our operations
@@ -229,16 +304,14 @@ impl USBStubEngine {
             if let Some(sessionid) = sessionid {
                 println!("plug session id {:016x}", sessionid);
 
-                let usb_dev = unsafe { IOUSBDeviceStruct::new(item) };
-                dbg!(&usb_dev);
-                usb_dev.test();
-
-                let usb_dev = USBDevice { _macos: usb_dev };
-
-                let mut devices = self_.usb_devices.borrow_mut();
-                let old_dev = devices.insert(sessionid, usb_dev);
-                if old_dev.is_some() {
-                    eprintln!("WARN: Got a duplicate sessionID??");
+                if let Some(usb_dev) = USBDevice::setup(item) {
+                    let mut devices = self_.usb_devices.borrow_mut();
+                    let old_dev = devices.insert(sessionid, usb_dev);
+                    if old_dev.is_some() {
+                        eprintln!("WARN: Got a duplicate sessionID??");
+                    }
+                } else {
+                    eprintln!("WARN: Device setup failed! session = 0x{:x}", sessionid);
                 }
             } else {
                 eprintln!("WARN: Got something without a sessionID??");

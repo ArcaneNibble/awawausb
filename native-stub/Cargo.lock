@@ -10,6 +10,7 @@ dependencies = [
  "kqueue-sys",
  "libc",
  "pin-init",
+ "usb-ch9",
 ]
 
 [[package]]
@@ -104,3 +105,16 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "usb-ch9"
+version = "0.0.0"
+dependencies = [
+ "utf16_lit",
+]
+
+[[package]]
+name = "utf16_lit"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14706d2a800ee8ff38c1d3edb873cd616971ea59eb7c0d046bb44ef59b06a1ae"
