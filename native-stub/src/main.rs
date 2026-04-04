@@ -263,6 +263,133 @@ impl USBStubEngine {
         pin_init::init_from_closure(Self::init_real)
     }
 
+    fn handle_stdin(self: Pin<&Self>) -> bool {
+        let msg = read_stdin_msg();
+        if let Err(e) = &msg
+            && e.kind() == io::ErrorKind::UnexpectedEof
+        {
+            log::debug!("EOF on stdin, goodbye!");
+            return false;
+        }
+        let msg = msg.expect("failed to read stdin");
+
+        let msg = str::from_utf8(&msg).expect("failed to parse message as utf-8");
+        let msg_parsed: protocol::RequestMessage =
+            serde_json::from_str(&msg).expect("failed to parse message as JSON");
+
+        macro_rules! send_error {
+            ($txn_id:expr, $err:ident) => {
+                let reply = protocol::ResponseMessage::RequestError {
+                    txn_id: $txn_id,
+                    error: protocol::Errors::$err,
+                };
+                let reply = serde_json::to_string(&reply).unwrap();
+                write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+            };
+        }
+
+        match msg_parsed {
+            protocol::RequestMessage::EchoTest { msg } => {
+                let reply = protocol::ResponseMessage::EchoResponse { msg };
+                let reply = serde_json::to_string(&reply).unwrap();
+                write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+            }
+            protocol::RequestMessage::ControlTransfer {
+                sid,
+                txn_id,
+                request_type,
+                request,
+                value,
+                index,
+                data,
+                length,
+                _timeout_internal,
+            } => {
+                // Deal with data
+                let mut txn_ok = false;
+                let mut dir = USBTransferDirection::HostToDevice;
+                let mut buf = Vec::new();
+                let mut len = 0;
+                if request_type & usb_ch9::ch9_core::REQ_DIR_D2H != 0 {
+                    if length.is_some() && data.is_none() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::DeviceToHost;
+                        len = length.unwrap() as usize;
+                        buf = Vec::with_capacity(len);
+                    }
+                } else {
+                    if data.is_some() && length.is_none() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::HostToDevice;
+                        buf = URL_SAFE_NO_PAD
+                            .decode(&data.unwrap())
+                            .expect("base64 decode error");
+                        len = buf.len();
+                    }
+                }
+                assert!(txn_ok, "received malformed request");
+                // Deal with data size limits
+                if len > u16::MAX as usize {
+                    send_error!(txn_id, RequestTooBig);
+                    return true;
+                }
+
+                // timeout of 0 --> no timeout
+                let timeout = _timeout_internal.unwrap_or_default();
+
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get(&sid) {
+                    // Prepare our transfer object
+                    let buf_ptr = buf.as_mut_ptr();
+                    let xfer = Box::new(USBTransfer {
+                        dir,
+                        txn_id: txn_id.clone(),
+                        buf,
+                    });
+                    let xfer_ptr = Box::into_raw(xfer);
+
+                    // Prepare OS transfer object
+                    let mut req = IOUSBDevRequestTO {
+                        bmRequestType: request_type,
+                        bRequest: request,
+                        wValue: value,
+                        wIndex: index,
+                        wLength: len as u16,
+                        pData: buf_ptr as *mut (),
+                        wLenDone: 0,
+                        noDataTimeout: timeout as u32,
+                        completionTimeout: timeout as u32,
+                    };
+
+                    log::debug!("control transfer, txn = {}, xfer = {:x?}", txn_id, req);
+                    let ret = unsafe {
+                        ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
+                            usb_dev._macos.0 as *const (),
+                            &mut req,
+                            Self::iokit_usb_completion,
+                            xfer_ptr as *const (),
+                        )
+                    };
+                    if ret != 0 {
+                        // NOTE: A removed device doesn't seem to generate errors here
+                        log::warn!(
+                            "DeviceRequestAsyncTO failed, txn = {}, ret = {:08x} ",
+                            txn_id,
+                            ret
+                        );
+                        send_error!(txn_id, TransferError);
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
+        }
+
+        true
+    }
+
     /// Run one loop. Returns true if we should continue
     pub fn run_loop(self: Pin<&Self>) -> bool {
         // Poll for events
@@ -297,127 +424,9 @@ impl USBStubEngine {
 
         for kevent in kevents_buf.iter() {
             if kevent.ident == 0 && kevent.filter == EventFilter::EVFILT_READ {
-                let msg = read_stdin_msg();
-                if let Err(e) = &msg
-                    && e.kind() == io::ErrorKind::UnexpectedEof
-                {
-                    log::debug!("EOF on stdin, goodbye!");
+                let cont = self.handle_stdin();
+                if !cont {
                     return false;
-                }
-                let msg = msg.expect("failed to read stdin");
-
-                let msg = str::from_utf8(&msg).expect("failed to parse message as utf-8");
-                let msg_parsed: protocol::RequestMessage =
-                    serde_json::from_str(&msg).expect("failed to parse message as JSON");
-
-                macro_rules! send_error {
-                    ($txn_id:expr, $err:ident) => {
-                        let reply = protocol::ResponseMessage::RequestError {
-                            txn_id: $txn_id,
-                            error: protocol::Errors::$err,
-                        };
-                        let reply = serde_json::to_string(&reply).unwrap();
-                        write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
-                    };
-                }
-
-                match msg_parsed {
-                    protocol::RequestMessage::EchoTest { msg } => {
-                        let reply = protocol::ResponseMessage::EchoResponse { msg };
-                        let reply = serde_json::to_string(&reply).unwrap();
-                        write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
-                    }
-                    protocol::RequestMessage::ControlTransfer {
-                        sid,
-                        txn_id,
-                        request_type,
-                        request,
-                        value,
-                        index,
-                        data,
-                        length,
-                        _timeout_internal,
-                    } => {
-                        // Deal with data
-                        let mut txn_ok = false;
-                        let mut dir = USBTransferDirection::HostToDevice;
-                        let mut buf = Vec::new();
-                        let mut len = 0;
-                        if request_type & usb_ch9::ch9_core::REQ_DIR_D2H != 0 {
-                            if length.is_some() && data.is_none() {
-                                txn_ok = true;
-                                dir = USBTransferDirection::DeviceToHost;
-                                len = length.unwrap() as usize;
-                                buf = Vec::with_capacity(len);
-                            }
-                        } else {
-                            if data.is_some() && length.is_none() {
-                                txn_ok = true;
-                                dir = USBTransferDirection::HostToDevice;
-                                buf = URL_SAFE_NO_PAD
-                                    .decode(&data.unwrap())
-                                    .expect("base64 decode error");
-                                len = buf.len();
-                            }
-                        }
-                        assert!(txn_ok, "received malformed request");
-                        // Deal with data size limits
-                        if len > u16::MAX as usize {
-                            send_error!(txn_id, RequestTooBig);
-                            continue;
-                        }
-
-                        // timeout of 0 --> no timeout
-                        let timeout = _timeout_internal.unwrap_or_default();
-
-                        let sid = sid.parse::<u64>().expect("received malformed request");
-
-                        let devices = self.usb_devices.borrow_mut();
-                        if let Some(usb_dev) = devices.get(&sid) {
-                            // Prepare our transfer object
-                            let buf_ptr = buf.as_mut_ptr();
-                            let xfer = Box::new(USBTransfer {
-                                dir,
-                                txn_id: txn_id.clone(),
-                                buf,
-                            });
-                            let xfer_ptr = Box::into_raw(xfer);
-
-                            // Prepare OS transfer object
-                            let mut req = IOUSBDevRequestTO {
-                                bmRequestType: request_type,
-                                bRequest: request,
-                                wValue: value,
-                                wIndex: index,
-                                wLength: len as u16,
-                                pData: buf_ptr as *mut (),
-                                wLenDone: 0,
-                                noDataTimeout: timeout as u32,
-                                completionTimeout: timeout as u32,
-                            };
-
-                            log::debug!("control transfer, txn = {}, xfer = {:x?}", txn_id, req);
-                            let ret = unsafe {
-                                ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
-                                    usb_dev._macos.0 as *const (),
-                                    &mut req,
-                                    Self::iokit_usb_completion,
-                                    xfer_ptr as *const (),
-                                )
-                            };
-                            if ret != 0 {
-                                // NOTE: A removed device doesn't seem to generate errors here
-                                log::warn!(
-                                    "DeviceRequestAsyncTO failed, txn = {}, ret = {:08x} ",
-                                    txn_id,
-                                    ret
-                                );
-                                send_error!(txn_id, TransferError);
-                            }
-                        } else {
-                            send_error!(txn_id, DeviceNotFound);
-                        }
-                    }
                 }
             } else if kevent.filter == EventFilter::EVFILT_MACHPORT {
                 let mut msg = OpaqueMachMessage::default();
@@ -535,7 +544,7 @@ impl USBStubEngine {
     /// Start watching a new Mach port
     ///
     /// Implicitly incrememnts actual_needed_event_sz
-    pub fn add_mach_port(&self, mach_port: libc::mach_port_t) -> io::Result<()> {
+    pub(crate) fn add_mach_port(&self, mach_port: libc::mach_port_t) -> io::Result<()> {
         // Register the port in kqueue
         let kevent_new = kqueue_sys::kevent::new(
             mach_port as usize,
