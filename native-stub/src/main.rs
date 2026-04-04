@@ -565,6 +565,13 @@ impl USBStubEngine {
             }
         }
 
+        log::debug!(
+            "request {} finished, err {:08x}, buf {:02x?}",
+            xfer.txn_id,
+            result,
+            xfer.buf
+        );
+
         // Send notification
         if result == kIOUSBPipeStalled {
             let notif = protocol::ResponseMessage::RequestError {
@@ -588,7 +595,6 @@ impl USBStubEngine {
             let notif = serde_json::to_string(&notif).unwrap();
             write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
         } else {
-            log::debug!("request {} finished with err {:08x}", xfer.txn_id, result);
             let notif = protocol::ResponseMessage::RequestError {
                 txn_id: xfer.txn_id,
                 error: protocol::Errors::TransferError,
