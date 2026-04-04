@@ -2,12 +2,16 @@ use std::{io, ptr};
 
 use kqueue_sys::*;
 
+mod macos_sys;
 mod stdio_unix;
+
+use macos_sys::*;
 
 /// Main struct holding all of the state for our operations
 pub struct USBStubEngine {
     kqueue: i32,
     kevents_buf: Vec<kevent>,
+    _io_notification_port: *mut IONotificationPort,
 }
 impl USBStubEngine {
     pub fn init() -> Self {
@@ -22,7 +26,26 @@ impl USBStubEngine {
             FilterFlag::empty(),
         );
 
-        let all_kevents = [kevent_stdin];
+        // Set up IOKit notifications incl. registering it for kevent
+        let io_notif_port = unsafe { IONotificationPortCreate(0) };
+        assert!(
+            !io_notif_port.is_null(),
+            "failed to create io notification port"
+        );
+        let io_notif_mach = unsafe { IONotificationPortGetMachPort(io_notif_port) };
+        assert_ne!(
+            io_notif_mach, 0,
+            "failed to create io notification mach port"
+        );
+
+        let kevent_mach = kqueue_sys::kevent::new(
+            io_notif_mach as usize,
+            EventFilter::EVFILT_MACHPORT,
+            EventFlag::EV_ADD,
+            FilterFlag::empty(),
+        );
+
+        let all_kevents = [kevent_stdin, kevent_mach];
         if unsafe {
             kqueue_sys::kevent(
                 kq,
@@ -43,6 +66,7 @@ impl USBStubEngine {
         Self {
             kqueue: kq,
             kevents_buf,
+            _io_notification_port: io_notif_port,
         }
     }
 
@@ -87,6 +111,14 @@ impl USBStubEngine {
         }
 
         true
+    }
+}
+impl Drop for USBStubEngine {
+    fn drop(&mut self) {
+        unsafe {
+            IONotificationPortDestroy(self._io_notification_port);
+            libc::close(self.kqueue);
+        }
     }
 }
 
