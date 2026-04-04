@@ -7,6 +7,7 @@ use std::mem;
 use std::pin::Pin;
 use std::ptr;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use core_foundation::base::CFRetain;
 use kqueue_sys::*;
 
@@ -46,9 +47,7 @@ impl USBDevice {
 
         // Create async event notification
         let mach_port = usb_dev.CreateDeviceAsyncPort().ok()?;
-        eprintln!("async mach port {}", mach_port);
         engine.add_mach_port(mach_port).ok()?;
-        eprintln!("added mach port ok");
         usb_dev.1 = &engine.actual_needed_event_sz;
 
         // Get device descriptor fields
@@ -246,7 +245,6 @@ impl USBStubEngine {
             let to_reserve = needed_events - kevents_buf.len();
             kevents_buf.reserve(to_reserve);
         }
-        dbg!(needed_events, kevents_buf.capacity());
 
         unsafe {
             let nevents = kqueue_sys::kevent(
@@ -281,6 +279,17 @@ impl USBStubEngine {
                 let msg_parsed: protocol::RequestMessage =
                     serde_json::from_str(&msg).expect("failed to parse message as JSON");
 
+                macro_rules! send_error {
+                    ($txn_id:expr, $err:ident) => {
+                        let reply = protocol::ResponseMessage::RequestError {
+                            txn_id: $txn_id,
+                            error: protocol::Errors::$err,
+                        };
+                        let reply = serde_json::to_string(&reply).unwrap();
+                        write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+                    };
+                }
+
                 match msg_parsed {
                     protocol::RequestMessage::EchoTest { msg } => {
                         let reply = protocol::ResponseMessage::EchoResponse { msg };
@@ -298,17 +307,34 @@ impl USBStubEngine {
                         length,
                         _timeout_internal,
                     } => {
+                        // Deal with data
                         let mut txn_ok = false;
+                        let mut buf = Vec::new();
+                        let mut len = 0;
                         if request_type & usb_ch9::ch9_core::REQ_DIR_D2H != 0 {
                             if length.is_some() && data.is_none() {
                                 txn_ok = true;
+                                len = length.unwrap() as usize;
+                                buf = Vec::with_capacity(len);
                             }
                         } else {
                             if data.is_some() && length.is_none() {
                                 txn_ok = true;
+                                buf = URL_SAFE_NO_PAD
+                                    .decode(&data.unwrap())
+                                    .expect("base64 decode error");
+                                len = buf.len();
                             }
                         }
                         assert!(txn_ok, "received malformed request");
+                        // Deal with data size limits
+                        if len > u16::MAX as usize {
+                            send_error!(txn_id, RequestTooBig);
+                            continue;
+                        }
+
+                        // timeout of 0 --> no timeout
+                        let timeout = _timeout_internal.unwrap_or_default();
 
                         let sid = sid.parse::<u64>().expect("received malformed request");
 
@@ -316,21 +342,22 @@ impl USBStubEngine {
                         if let Some(usb_dev) = devices.get(&sid) {
                             eprintln!("ctrl xfer {:?}", usb_dev);
                             // TODO do it for real
-                            let mut buf = Vec::<u8>::with_capacity(4);
                             let buf_ptr = buf.as_mut_ptr();
                             std::mem::forget(buf);
-                            let mut req = IOUSBDevRequest {
-                                bmRequestType: 0xC0,
-                                bRequest: b'e',
-                                wValue: 0,
-                                wIndex: 0,
-                                wLength: 4,
+                            let mut req = IOUSBDevRequestTO {
+                                bmRequestType: request_type,
+                                bRequest: request,
+                                wValue: value,
+                                wIndex: index,
+                                wLength: len as u16,
                                 pData: buf_ptr as *mut (),
                                 wLenDone: 0,
+                                noDataTimeout: timeout as u32,
+                                completionTimeout: timeout as u32,
                             };
 
                             let ret = unsafe {
-                                ((**usb_dev._macos.0).DeviceRequestAsync)(
+                                ((**usb_dev._macos.0).DeviceRequestAsyncTO)(
                                     usb_dev._macos.0 as *const (),
                                     &mut req,
                                     Self::async_cb_test,
@@ -339,12 +366,7 @@ impl USBStubEngine {
                             };
                             eprintln!("ret {} ", ret);
                         } else {
-                            let reply = protocol::ResponseMessage::RequestError {
-                                txn_id,
-                                error: protocol::Errors::DeviceNotFound,
-                            };
-                            let reply = serde_json::to_string(&reply).unwrap();
-                            write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+                            send_error!(txn_id, DeviceNotFound);
                         }
                     }
                 }

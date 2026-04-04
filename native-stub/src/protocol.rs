@@ -3,7 +3,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
 #[non_exhaustive]
 pub enum Errors {
+    /// The device was not found
+    ///
+    /// This can happen either when the device ID is totally bogus,
+    /// or when surprise removal happens.
     DeviceNotFound,
+    /// A request was too big
+    ///
+    /// For example, a control transfer of more than 0xffff bytes,
+    /// an isoc transfer of too many packets, etc.
+    ///
+    /// We do not attempt to hide platform-specific quirks.
+    RequestTooBig,
 }
 
 #[derive(Serialize)]

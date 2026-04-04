@@ -8,7 +8,7 @@ nativeport.onMessage.addListener((m) => {
             "sid": m.sid,
             "txn_id": "deadbeef",
             "request_type": 0xc0,
-            "request": 'E'.charCodeAt(0),
+            "request": 'e'.charCodeAt(0),
             "value": 0,
             "index": 0,
             "length": 4,
