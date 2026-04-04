@@ -557,7 +557,38 @@ impl USBStubEngine {
                 xfer.buf.set_len(actual_len);
             }
         }
-        eprintln!("cb done! ret {:08x} xfer {:x?}", result as u32, xfer);
+
+        // Send notification
+        if result == kIOUSBPipeStalled {
+            let notif = protocol::ResponseMessage::RequestError {
+                txn_id: xfer.txn_id,
+                error: protocol::Errors::Stall,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        } else if result == 0 || result == kIOReturnOverrun {
+            let babble = result == kIOReturnOverrun;
+            let data = if xfer.dir == USBTransferDirection::DeviceToHost {
+                Some(URL_SAFE_NO_PAD.encode(&xfer.buf))
+            } else {
+                None
+            };
+            let notif = protocol::ResponseMessage::RequestComplete {
+                txn_id: xfer.txn_id,
+                babble,
+                data,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        } else {
+            eprintln!("cb done err {:08x}", result);
+            let notif = protocol::ResponseMessage::RequestError {
+                txn_id: xfer.txn_id,
+                error: protocol::Errors::TransferError,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        }
 
         // n.b. the xfer will now be deallocated automagically
     }

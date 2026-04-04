@@ -20,6 +20,11 @@ impl Default for OpaqueMachMessage {
 pub const MACH_RCV_MSG: libc::c_int = 0x0000_0002;
 pub const MACH_RCV_INVALID_NAME: kern_return_t = 0x10004002;
 
+#[allow(non_upper_case_globals)]
+pub const kIOUSBPipeStalled: kern_return_t = 0xe000404fu32 as i32;
+#[allow(non_upper_case_globals)]
+pub const kIOReturnOverrun: kern_return_t = 0xe00002e8u32 as i32;
+
 #[repr(C)]
 pub struct IONotificationPort {
     _private: [u8; 0],

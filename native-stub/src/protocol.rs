@@ -15,15 +15,33 @@ pub enum Errors {
     ///
     /// We do not attempt to hide platform-specific quirks.
     RequestTooBig,
+    /// Device returned STALL condition
+    Stall,
+    /// Some kind of error occurred, but we are not required to be any more specific
+    TransferError,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ResponseMessage {
-    EchoResponse { msg: String },
-    NewDevice { sid: String },
-    UnplugDevice { sid: String },
-    RequestError { txn_id: String, error: Errors },
+    EchoResponse {
+        msg: String,
+    },
+    NewDevice {
+        sid: String,
+    },
+    UnplugDevice {
+        sid: String,
+    },
+    RequestError {
+        txn_id: String,
+        error: Errors,
+    },
+    RequestComplete {
+        txn_id: String,
+        babble: bool,
+        data: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
