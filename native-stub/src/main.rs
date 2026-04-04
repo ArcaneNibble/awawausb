@@ -4,13 +4,38 @@ use std::io;
 use std::mem;
 use std::ptr;
 
-use core_foundation::base::CFRetain;
+use core_foundation::{
+    base::{CFRetain, CFType, FromVoid, TCFType},
+    number::CFNumber,
+    string::CFString,
+};
 use kqueue_sys::*;
 
 mod macos_sys;
 mod stdio_unix;
 
 use macos_sys::*;
+
+fn get_session_id(obj: io_object_t) -> Option<u64> {
+    let sessionid = unsafe {
+        IORegistryEntryCreateCFProperty(
+            obj,
+            CFString::from_static_string("sessionID").as_CFTypeRef() as *const _,
+            ptr::null(),
+            0,
+        )
+    };
+
+    if !sessionid.is_null() {
+        let sessionid = unsafe { CFType::from_void(sessionid) };
+        if let Some(sessionid) = sessionid.downcast::<CFNumber>() {
+            if let Some(sessionid) = sessionid.to_i64() {
+                return Some(sessionid as u64);
+            }
+        }
+    }
+    None
+}
 
 /// Main struct holding all of the state for our operations
 pub struct USBStubEngine {
@@ -213,6 +238,14 @@ impl USBStubEngine {
             if item.0 == 0 {
                 break;
             }
+
+            let sessionid = get_session_id(item);
+            if let Some(sessionid) = sessionid {
+                println!("plug session id {:016x}", sessionid);
+            }
+
+            let ret = unsafe { IOObjectRelease(item) };
+            assert_eq!(ret, 0);
         }
     }
 
@@ -228,6 +261,14 @@ impl USBStubEngine {
             if item.0 == 0 {
                 break;
             }
+
+            let sessionid = get_session_id(item);
+            if let Some(sessionid) = sessionid {
+                println!("unplug session id {:016x}", sessionid);
+            }
+
+            let ret = unsafe { IOObjectRelease(item) };
+            assert_eq!(ret, 0);
         }
     }
 }

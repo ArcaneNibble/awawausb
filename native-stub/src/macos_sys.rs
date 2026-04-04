@@ -1,4 +1,8 @@
-use core_foundation::dictionary::{CFDictionaryRef, CFMutableDictionaryRef};
+use core_foundation::{
+    base::{CFAllocatorRef, CFTypeRef},
+    dictionary::{CFDictionaryRef, CFMutableDictionaryRef},
+    string::CFStringRef,
+};
 use libc::{kern_return_t, mach_port_t};
 
 #[repr(C, align(8))]
@@ -60,4 +64,11 @@ unsafe extern "C" {
 
     pub fn IOIteratorNext(iterator: io_object_t) -> io_object_t;
     pub fn IOObjectRelease(object: io_object_t) -> kern_return_t;
+
+    pub fn IORegistryEntryCreateCFProperty(
+        entry: io_object_t,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        options: u32,
+    ) -> CFTypeRef;
 }
