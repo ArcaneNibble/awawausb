@@ -123,31 +123,44 @@ browser.runtime.onConnect.addListener((p) => {
     });
 
     p.onMessage.addListener((m) => {
-        console.log("test from bkg", m);
-        // p.postMessage(m * 2);
-        // browser.windows.create({
-        //     type: "panel",
-        //     url: `/permission-page/permission.html?test=${m}`
-        // });
-
-        // Test
-        let this_txn_id = port_txn_id++;
-        let txn_id = `${this_port_id}-${this_txn_id}`;
-        // TODO: Do we need this? Can we get rid of this?
-        usb_txns.set(txn_id, true);
-
-        let obj = {
-            _timeout_internal: 0,
-            type: "ControlTransfer",
-            sid: m,
-            txn_id,
-            request_type: 0xc0,
-            request: 'e'.charCodeAt(0),
-            value: 0,
-            index: 0,
-            length: 4,
+        if (m.type === "echo") {
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: true,
+                msg: m.msg,
+            });
+        } else {
+            console.warn("Unknown request from a page", m, p.sender.url);
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: false,
+            });
         }
-        nativeport.postMessage(obj);
+        // console.log("test from bkg", m);
+        // // p.postMessage(m * 2);
+        // // browser.windows.create({
+        // //     type: "panel",
+        // //     url: `/permission-page/permission.html?test=${m}`
+        // // });
+
+        // // Test
+        // let this_txn_id = port_txn_id++;
+        // let txn_id = `${this_port_id}-${this_txn_id}`;
+        // // TODO: Do we need this? Can we get rid of this?
+        // usb_txns.set(txn_id, true);
+
+        // let obj = {
+        //     _timeout_internal: 0,
+        //     type: "ControlTransfer",
+        //     sid: m,
+        //     txn_id,
+        //     request_type: 0xc0,
+        //     request: 'e'.charCodeAt(0),
+        //     value: 0,
+        //     index: 0,
+        //     length: 4,
+        // }
+        // nativeport.postMessage(obj);
     });
 });
 

@@ -8,29 +8,38 @@
 // script which runs within the page context. This is so that
 // we do not need to go through very complicated mechanisms to
 // export an entire class to the page. All of the "complicated"
-// objects exist in the page "main" script only; we only expose
-// very simple functions.
+// objects exist in the page "main" script only, and we only
+// expose a single async function.
+//
+// This code *does* need to pair up async requests and responses,
+// using a transaction ID number.
 
 let port = browser.runtime.connect();
-let callback = undefined;
 
-function register_callback(cb) {
-    if (callback !== undefined)
-        console.warn("awawausb callback already set!");
-    else
-        callback = cb;
-}
-exportFunction(register_callback, window, { defineAs: "__awawausb_register_callback" });
+let txn_id = 0;
+let txn_map = new Map();
 
 port.onMessage.addListener((m) => {
-    // XXX is this actually safe?
-    // It doesn't use any of the super-dangerous methods, and the callback is set only once,
-    // and it's set to a function in a local scope. Hopefully this is fine?
-    if (callback !== undefined)
-        callback(m);
+    let [resolve, reject] = txn_map.get(m.txn_id);
+    txn_map.delete(m.txn_id);
+
+    if (m.success) {
+        resolve(cloneInto(m, window));
+    } else {
+        reject(cloneInto(m, window));
+    }
 });
 
 function send_request(x) {
+    let resolve, reject;
+    let promise = new window.Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    let this_txn_id = txn_id++;
+    txn_map.set(this_txn_id, [resolve, reject]);
+    x.txn_id = this_txn_id;
     port.postMessage(x);
+    return promise;
 }
 exportFunction(send_request, window, { defineAs: "__awawausb_send_request" });

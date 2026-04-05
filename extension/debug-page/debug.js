@@ -167,7 +167,6 @@ port.onMessage.addListener((m) => {
             list_pages_ol.appendChild(li);
         }
     } else if (m.type === "list_txns") {
-        console.log(m);
         list_of_txns.replaceChildren();
 
         for (let txn_id of m.txns) {
