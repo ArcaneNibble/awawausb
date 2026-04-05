@@ -199,11 +199,21 @@
     };
 
     // "Global" objects and event handling
-
-    // TODO
     window.USBConnectionEvent = class extends Event {
-        get foo() {
-            return "foo!";
+        #device
+        constructor(type, eventInitDict) {
+            super(type, eventInitDict);
+            let device = eventInitDict.device;
+            if (device === undefined) {
+                throw new TypeError("missing `device` in USBConnectionEventInit");
+            }
+            if (!(device instanceof USBDevice)) {
+                throw new TypeError("expected a USBDevice");
+            }
+            this.#device = device;
+        }
+        get device() {
+            return this.#device;
         }
     };
 
@@ -227,6 +237,40 @@
             devid[DEV_DEVID] = 12345;
             let dev = new USBDevice(devid);
             return dev;
+        }
+
+        // Event dispatching
+        #onconnect;
+        #onconnect_set = false;
+        #ondisconnect;
+        #ondisconnect_set = false;
+
+        get onconnect() {
+            return this.#onconnect;
+        }
+        set onconnect(x) {
+            this.#onconnect = x;
+            if (!this.#onconnect_set) {
+                let that = this;
+                this.addEventListener('connect', function (e) {
+                    that.#onconnect.call(this, e);
+                });
+            }
+            this.#onconnect_set = true;
+        }
+
+        get ondisconnect() {
+            return this.#ondisconnect;
+        }
+        set ondisconnect(x) {
+            this.#ondisconnect = x;
+            if (!this.#ondisconnect_set) {
+                let that = this;
+                this.addEventListener('disconnect', function (e) {
+                    that.#ondisconnect.call(this, e);
+                });
+            }
+            this.#ondisconnect_set = true;
         }
     };
     navigator.usb = new USB();
