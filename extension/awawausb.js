@@ -153,6 +153,7 @@ nativeport.onMessage.addListener(async (m) => {
             let interfaces = new Array();
             let binterface_to_idx = new Map();
             for (let intf of cfg.interfaces) {
+                // Shuffle
                 if (!binterface_to_idx.has(intf.bInterfaceNumber)) {
                     let idx = interfaces.length;
                     interfaces.push({
@@ -169,6 +170,12 @@ nativeport.onMessage.addListener(async (m) => {
                     intf_name = await get_string_desc(intf.iInterface);
                 }
 
+                // Endpoints
+                let eps = new Array();
+                for (let ep of intf.endpoints) {
+                    eps.push(ep);
+                }
+
                 let intf_obj = interfaces[binterface_to_idx.get(intf.bInterfaceNumber)];
                 intf_obj.alts.push({
                     bAlternateSetting: intf.bAlternateSetting,
@@ -177,6 +184,7 @@ nativeport.onMessage.addListener(async (m) => {
                     bInterfaceProtocol: intf.bInterfaceProtocol,
 
                     intf_name,
+                    endpoints: eps,
                 });
             }
 

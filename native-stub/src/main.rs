@@ -505,6 +505,8 @@ impl USBStubEngine {
                                                 bInterfaceSubClass: d.bInterfaceSubClass,
                                                 bInterfaceProtocol: d.bInterfaceProtocol,
                                                 iInterface: d.iInterface,
+
+                                                endpoints: Vec::new(),
                                             },
                                         );
                                     } else {
@@ -514,12 +516,31 @@ impl USBStubEngine {
                                         )
                                     }
                                 }
-                                // usb_ch9::DescriptorRef::Endpoint(endpoint_descriptor) => todo!(),
-                                // usb_ch9::DescriptorRef::String(string_descriptor) => todo!(),
-                                // usb_ch9::DescriptorRef::UnknownDescriptor(items) => todo!(),
+                                usb_ch9::DescriptorRef::Endpoint(d) => {
+                                    if let Some(this_config_desc) = &mut this_config_desc {
+                                        if let Some(last_iface) =
+                                            this_config_desc.interfaces.iter_mut().last()
+                                        {
+                                            last_iface.endpoints.push(protocol::DeviceEndpoint {
+                                                bEndpointAddress: d.bEndpointAddress,
+                                                bmAttributes: d.bmAttributes,
+                                                wMaxPacketSize: d.wMaxPacketSize,
+                                            });
+                                        } else {
+                                            log::warn!(
+                                                "Bogus endpoint descriptor without interface descriptor? {:?}",
+                                                desc
+                                            )
+                                        }
+                                    } else {
+                                        log::warn!(
+                                            "Bogus endpoint descriptor without config descriptor? {:?}",
+                                            desc
+                                        )
+                                    }
+                                }
                                 _ => {}
                             }
-                            // eprintln!("{:x?}", desc);
                         }
 
                         if this_config_desc.is_none() {

@@ -25,6 +25,14 @@ pub enum Errors {
 
 #[allow(non_snake_case)]
 #[derive(Serialize)]
+pub struct DeviceEndpoint {
+    pub bEndpointAddress: u8,
+    pub bmAttributes: u8,
+    pub wMaxPacketSize: u16,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize)]
 pub struct DeviceInterface {
     pub bInterfaceNumber: u8,
     pub bAlternateSetting: u8,
@@ -32,6 +40,8 @@ pub struct DeviceInterface {
     pub bInterfaceSubClass: u8,
     pub bInterfaceProtocol: u8,
     pub iInterface: u8,
+
+    pub endpoints: Vec<DeviceEndpoint>,
 }
 
 #[allow(non_snake_case)]
