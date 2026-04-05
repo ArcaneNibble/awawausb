@@ -142,15 +142,48 @@ nativeport.onMessage.addListener(async (m) => {
 
         let configs = new Array();
         for (let cfg of m.configs) {
+            // Configuration name string
             let config_name = null;
             if (cfg.iConfiguration !== 0) {
                 console.log("need to get string!", cfg.iConfiguration, cfg.bConfigurationValue);
                 config_name = await get_string_desc(cfg.iConfiguration);
             }
 
+            // Interfaces (some shuffling needed to be convenient for webusb order)
+            let interfaces = new Array();
+            let binterface_to_idx = new Map();
+            for (let intf of cfg.interfaces) {
+                if (!binterface_to_idx.has(intf.bInterfaceNumber)) {
+                    let idx = interfaces.length;
+                    interfaces.push({
+                        bInterfaceNumber: intf.bInterfaceNumber,
+                        alts: new Array(),
+                    });
+                    binterface_to_idx.set(intf.bInterfaceNumber, idx);
+                }
+
+                // Interface (alternate) name string
+                let intf_name = null;
+                if (intf.iInterface !== 0) {
+                    console.log("need to get string!", intf.iInterface, intf.bInterfaceNumber, intf.bAlternateSetting);
+                    intf_name = await get_string_desc(intf.iInterface);
+                }
+
+                let intf_obj = interfaces[binterface_to_idx.get(intf.bInterfaceNumber)];
+                intf_obj.alts.push({
+                    bAlternateSetting: intf.bAlternateSetting,
+                    bInterfaceClass: intf.bInterfaceClass,
+                    bInterfaceSubClass: intf.bInterfaceSubClass,
+                    bInterfaceProtocol: intf.bInterfaceProtocol,
+
+                    intf_name,
+                });
+            }
+
             configs.push({
                 bConfigurationValue: cfg.bConfigurationValue,
                 config_name,
+                interfaces,
             });
         }
 

@@ -61,7 +61,7 @@ pub struct USBDevice {
 
     pub current_configuration_id: u8,
 
-    _macos: IOUSBDeviceStruct,
+    _macos_dev: IOUSBDeviceStruct,
 }
 impl USBDevice {
     #[allow(non_snake_case)]
@@ -141,7 +141,7 @@ impl USBDevice {
 
             current_configuration_id: current_config,
 
-            _macos: usb_dev,
+            _macos_dev: usb_dev,
         })
     }
 }
@@ -357,7 +357,7 @@ impl USBStubEngine {
                         buf,
                     };
 
-                    if let Err(ret) = usb_dev._macos.ctrl_xfer(
+                    if let Err(ret) = usb_dev._macos_dev.ctrl_xfer(
                         xfer,
                         request_type,
                         request,
@@ -491,12 +491,31 @@ impl USBStubEngine {
                                         this_config_desc = Some(protocol::DeviceConfiguration {
                                             bConfigurationValue: d.bConfigurationValue,
                                             iConfiguration: d.iConfiguration,
+                                            interfaces: Vec::new(),
                                         });
                                     }
                                 }
-                                // usb_ch9::DescriptorRef::String(string_descriptor) => todo!(),
-                                // usb_ch9::DescriptorRef::Interface(interface_descriptor) => todo!(),
+                                usb_ch9::DescriptorRef::Interface(d) => {
+                                    if let Some(this_config_desc) = &mut this_config_desc {
+                                        this_config_desc.interfaces.push(
+                                            protocol::DeviceInterface {
+                                                bInterfaceNumber: d.bInterfaceNumber,
+                                                bAlternateSetting: d.bAlternateSetting,
+                                                bInterfaceClass: d.bInterfaceClass,
+                                                bInterfaceSubClass: d.bInterfaceSubClass,
+                                                bInterfaceProtocol: d.bInterfaceProtocol,
+                                                iInterface: d.iInterface,
+                                            },
+                                        );
+                                    } else {
+                                        log::warn!(
+                                            "Bogus interface descriptor without config descriptor? {:?}",
+                                            desc
+                                        )
+                                    }
+                                }
                                 // usb_ch9::DescriptorRef::Endpoint(endpoint_descriptor) => todo!(),
+                                // usb_ch9::DescriptorRef::String(string_descriptor) => todo!(),
                                 // usb_ch9::DescriptorRef::UnknownDescriptor(items) => todo!(),
                                 _ => {}
                             }
@@ -509,6 +528,7 @@ impl USBStubEngine {
                             this_config_desc = Some(protocol::DeviceConfiguration {
                                 bConfigurationValue: 0,
                                 iConfiguration: 0,
+                                interfaces: Vec::new(),
                             });
                         }
 

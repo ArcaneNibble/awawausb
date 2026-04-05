@@ -25,9 +25,22 @@ pub enum Errors {
 
 #[allow(non_snake_case)]
 #[derive(Serialize)]
+pub struct DeviceInterface {
+    pub bInterfaceNumber: u8,
+    pub bAlternateSetting: u8,
+    pub bInterfaceClass: u8,
+    pub bInterfaceSubClass: u8,
+    pub bInterfaceProtocol: u8,
+    pub iInterface: u8,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize)]
 pub struct DeviceConfiguration {
     pub bConfigurationValue: u8,
     pub iConfiguration: u8,
+
+    pub interfaces: Vec<DeviceInterface>,
 }
 
 #[allow(non_snake_case)]
