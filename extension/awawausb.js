@@ -99,9 +99,10 @@ browser.runtime.onConnect.addListener((p) => {
 
     p.onMessage.addListener((m) => {
         console.log("test from bkg", m);
-        nativeport.postMessage({
-            "type": "EchoTest",
-            "msg": m.toString(),
+        p.postMessage(m * 2);
+        browser.windows.create({
+            type: "panel",
+            url: `/permission-page/permission.html?test=${m}`
         });
     });
 });
@@ -334,9 +335,7 @@ nativeport.onMessage.addListener(async (m) => {
             current_config: m.current_config,
             configs,
             webusb_landing_page,
-            // TODO: Put other data here too
         });
-        console.log(usb_devices);
     } else if (m.type === "UnplugDevice") {
         let sid = m.sid;
         let device = usb_devices.get(sid);
@@ -346,7 +345,6 @@ nativeport.onMessage.addListener(async (m) => {
         }
         // TODO: Probably abort all outstanding transactions?
         usb_devices.delete(sid);
-        console.log(usb_devices);
     } else if (m.type === "RequestComplete") {
         let data = undefined;
         if (m.data !== null && m.data !== undefined) {

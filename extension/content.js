@@ -12,11 +12,25 @@
 // very simple functions.
 
 let port = browser.runtime.connect();
-console.log("content port", port);
+let callback = undefined;
 
-function testfunc(x) {
-    console.log("test from content", x);
+function register_callback(cb) {
+    if (callback !== undefined)
+        console.warn("awawausb callback already set!");
+    else
+        callback = cb;
+}
+exportFunction(register_callback, window, { defineAs: "__awawausb_register_callback" });
+
+port.onMessage.addListener((m) => {
+    // XXX is this actually safe?
+    // It doesn't use any of the super-dangerous methods, and the callback is set only once,
+    // and it's set to a function in a local scope. Hopefully this is fine?
+    if (callback !== undefined)
+        callback(m);
+});
+
+function send_request(x) {
     port.postMessage(x);
 }
-
-exportFunction(testfunc, window, { defineAs: "__awawausb_testfunc" });
+exportFunction(send_request, window, { defineAs: "__awawausb_send_request" });

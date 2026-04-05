@@ -6,6 +6,13 @@
 // We choose to implement the bulk of the API here, but treating
 // all data as suspect within the *background* script.
 
+(() => {
+    function message_from_background(m) {
+        console.log("reply from awawausb", m);
+    }
+    __awawausb_register_callback(message_from_background);
+})();
+
 class USBConnectionEvent extends Event {
     get foo() {
         return "foo!";
@@ -15,7 +22,7 @@ class USBConnectionEvent extends Event {
 class USB extends EventTarget {
     test() {
         console.log("test?");
-        window.__awawausb_testfunc(123);
+        window.__awawausb_send_request(123);
     }
 }
 
