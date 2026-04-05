@@ -7,6 +7,10 @@
 // all data as suspect within the *background* script.
 
 (function() {
+    // Get, and then immediately hide, our interface methods with the content script
+    const __awawausb_send_request = window.__awawausb_send_request;
+    delete window.__awawausb_send_request;
+
     function check_xfer_status(status) {
         if (status === "ok") {
             return;
@@ -130,6 +134,70 @@
         }
     };
 
+    // Classes for the USB devices
+    const DEV_DEVID = Symbol("USBDevice.device_id");
+    window.USBDevice = class {
+        #device_id
+        constructor(devid) {
+            // This song-and-dance helps to prevent user code from
+            // trying to construct a USBDevice manually.
+            // It's *NOT* a security boundary, since there's always
+            // a chance __awawausb_send_request can leak.
+            if (devid === undefined) {
+                throw new TypeError("Illegal constructor");
+            }
+            let devid_ = devid[DEV_DEVID];
+            if (devid_ === undefined) {
+                throw new TypeError("Illegal constructor");
+            }
+            this.#device_id = devid_;
+        }
+        get test() {
+            return this.#device_id;
+        }
+    };
+
+    const DEV_DESC_PARENT = Symbol("awawausb.descriptor_parent");
+    window.USBConfiguration = class {
+        [DEV_DESC_PARENT];
+        constructor(device, configurationValue) {
+            if (!(device instanceof USBDevice)) {
+                throw new TypeError("expected a USBDevice");
+            }
+            this[DEV_DESC_PARENT] = device;
+        }
+    };
+
+    window.USBInterface = class {
+        [DEV_DESC_PARENT];
+        constructor(configuration, interfaceNumber) {
+            if (!(configuration instanceof USBConfiguration)) {
+                throw new TypeError("expected a USBConfiguration");
+            }
+            this[DEV_DESC_PARENT] = configuration;
+        }
+    };
+
+    window.USBAlternateInterface = class {
+        [DEV_DESC_PARENT];
+        constructor(deviceInterface, alternateSetting) {
+            if (!(deviceInterface instanceof USBInterface)) {
+                throw new TypeError("expected a USBInterface");
+            }
+            this[DEV_DESC_PARENT] = deviceInterface;
+        }
+    };
+
+    window.USBEndpoint = class {
+        [DEV_DESC_PARENT];
+        constructor(alternate, endpointNumber, direction) {
+            if (!(alternate instanceof USBAlternateInterface)) {
+                throw new TypeError("expected a USBAlternateInterface");
+            }
+            this[DEV_DESC_PARENT] = alternate;
+        }
+    };
+
     // "Global" objects and event handling
 
     // TODO
@@ -149,10 +217,16 @@
         }
         async test(x) {
             console.log("test?");
-            console.log(await window.__awawausb_send_request({
+            console.log(await __awawausb_send_request({
                 type: "echo",
                 msg: x,
             }));
+        }
+        test2() {
+            let devid = {};
+            devid[DEV_DEVID] = 12345;
+            let dev = new USBDevice(devid);
+            return dev;
         }
     };
     navigator.usb = new USB();
