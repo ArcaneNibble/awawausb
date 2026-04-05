@@ -132,14 +132,14 @@ nativeport.onMessage.addListener(async (m) => {
             return str;
         }
 
-        // // TODO: Query actually useful data
-        // let ret = await internal_perform_control_transfer(sid, 0xC0, 'e'.charCodeAt(0), 0, 0, 4, 0);
-        // console.log("ret", ret);
-        // ret = await internal_perform_control_transfer(sid, 0x40, 'E'.charCodeAt(0), 0, 0, new Uint8Array([11, 22, 33, 44]));
-        // console.log("ret", ret);
-        // ret = await internal_perform_control_transfer(sid, 0xC0, 'E'.charCodeAt(0), 0, 0, 4);
-        // console.log("ret", ret);
+        try {
+            let ret = await internal_perform_control_transfer(sid, 0xC0, 'z'.charCodeAt(0), 0, 0, 4, 0);
+            console.log("ret", ret);
+        } catch (e) {
+            console.log("err", e);
+        }
 
+        // Big data shuffle, for descriptors
         let configs = new Array();
         for (let cfg of m.configs) {
             // Configuration name string
@@ -199,6 +199,8 @@ nativeport.onMessage.addListener(async (m) => {
             });
         }
 
+        // TODO: BOS, WebUSB descriptors
+
         usb_devices.set(sid, {
             bcdUSB: m.bcdUSB,
             bDeviceClass: m.bDeviceClass,
@@ -248,6 +250,23 @@ nativeport.onMessage.addListener(async (m) => {
                 data: data,
                 babble: m.babble,
             });
+        } else {
+            // TODO: Requests directed at pages
+        }
+    } else if (m.type == "RequestError") {
+        let txn_id = m.txn_id;
+        let txn = usb_txns.get(txn_id);
+        if (txn === undefined) {
+            console.warn("Completing unknown transaction?", txn_id);
+            return;
+        }
+        usb_txns.delete(txn_id);
+
+        let [page_id, _txn_id] = txn_id.split('-');
+        if (+page_id == 0) {
+            // Request directed for internal use
+            let [_resolve, reject] = txn;
+            reject(m.error);
         } else {
             // TODO: Requests directed at pages
         }
