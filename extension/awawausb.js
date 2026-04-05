@@ -88,6 +88,8 @@ nativeport.onMessage.addListener(async (m) => {
             console.warn("Duplicate device??", sid);
         }
 
+        console.log("Probing new USB device!", m.idVendor, m.idProduct);
+
         // Query extra data
         // We try as hard as possible to *not* generate unnecessary traffic,
         // but sometimes we can't avoid it (need strings, need webusb descriptor).
@@ -97,14 +99,18 @@ nativeport.onMessage.addListener(async (m) => {
         // u16 -> use this language
         let usb_lang_id = undefined;
         async function get_lang_id() {
-            console.log("query lang id");
             if (usb_lang_id === undefined) {
-                // Query the langid string descriptor
-                let langid_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300, 0, 4);
-                if (langid_desc.data.length < 4 || langid_desc.data[1] != 0x03) {
+                try {
+                    // Query the langid string descriptor
+                    let langid_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300, 0, 4);
+                    if (langid_desc.data.length < 4 || langid_desc.data[1] != 0x03) {
+                        usb_lang_id = null;
+                    } else {
+                        usb_lang_id = (langid_desc.data[3] << 8) | langid_desc.data[2];
+                    }
+                } catch (e) {
+                    console.warn("Getting langid failed!", e);
                     usb_lang_id = null;
-                } else {
-                    usb_lang_id = (langid_desc.data[3] << 8) | langid_desc.data[2];
                 }
                 return usb_lang_id;
             } else {
@@ -115,28 +121,25 @@ nativeport.onMessage.addListener(async (m) => {
         async function get_string_desc(idx) {
             let langid = await get_lang_id();
             if (langid === null) return null;
-            console.log("get string desc", idx, langid);
 
-            let initial_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, 4);
-            if (initial_desc.data.length < 2 || initial_desc.data[1] != 0x03) return null;
-            let actual_len = initial_desc.data[0];
+            try {
+                let initial_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, 4);
+                if (initial_desc.data.length < 2 || initial_desc.data[1] != 0x03) return null;
+                let actual_len = initial_desc.data[0];
 
-            let string_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, actual_len);
-            if (string_desc.data.length != actual_len || string_desc.data[1] != 0x03) return null;
+                let string_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, actual_len);
+                if (string_desc.data.length != actual_len || string_desc.data[1] != 0x03) return null;
 
-            let str = "";
-            let dv = new DataView(string_desc.data.buffer);
-            for (let i = 2; i < string_desc.data.length; i += 2) {
-                str += String.fromCharCode(dv.getUint16(i, true));
+                let str = "";
+                let dv = new DataView(string_desc.data.buffer);
+                for (let i = 2; i < string_desc.data.length; i += 2) {
+                    str += String.fromCharCode(dv.getUint16(i, true));
+                }
+                return str;
+            } catch (e) {
+                console.warn("Getting string descriptor failed!", idx, langid);
+                return null;
             }
-            return str;
-        }
-
-        try {
-            let ret = await internal_perform_control_transfer(sid, 0xC0, 'z'.charCodeAt(0), 0, 0, 4, 0);
-            console.log("ret", ret);
-        } catch (e) {
-            console.log("err", e);
         }
 
         // Big data shuffle, for descriptors
@@ -145,7 +148,6 @@ nativeport.onMessage.addListener(async (m) => {
             // Configuration name string
             let config_name = null;
             if (cfg.iConfiguration !== 0) {
-                console.log("need to get string!", cfg.iConfiguration, cfg.bConfigurationValue);
                 config_name = await get_string_desc(cfg.iConfiguration);
             }
 
@@ -166,7 +168,6 @@ nativeport.onMessage.addListener(async (m) => {
                 // Interface (alternate) name string
                 let intf_name = null;
                 if (intf.iInterface !== 0) {
-                    console.log("need to get string!", intf.iInterface, intf.bInterfaceNumber, intf.bAlternateSetting);
                     intf_name = await get_string_desc(intf.iInterface);
                 }
 
