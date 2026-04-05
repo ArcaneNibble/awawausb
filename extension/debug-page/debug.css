@@ -1,0 +1,38 @@
+html {
+    box-sizing: border-box;
+    font-size: 100%;
+}
+*, *::before, *::after {
+    box-sizing: inherit;
+}
+* {
+    margin: 0;
+}
+
+body {
+    margin-left: 1em;
+    margin-top: 1em;
+
+    font-variant-numeric: tabular-nums;
+}
+
+ul {
+    list-style: none;
+    padding: 0;
+}
+
+table {
+    border: 1px solid black;
+    border-collapse: collapse;
+
+    tr:not(:has(> td + td > ul)):nth-child(even) {
+        background-color: #ddd;
+    }
+}
+
+summary {
+    border: 2px solid #333;
+    border-radius: 0.25em;
+    margin: 1px 0;
+    padding-inline-start: 2px;
+}

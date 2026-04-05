@@ -316,7 +316,7 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         if (webusb_landing_page !== undefined) {
-            console.log("TODO: WebUSB landing page", webusb_landing_page);
+            console.log("TODO: Do something WebUSB landing page", webusb_landing_page);
         }
 
         usb_devices.set(sid, {
@@ -333,6 +333,7 @@ nativeport.onMessage.addListener(async (m) => {
 
             current_config: m.current_config,
             configs,
+            webusb_landing_page,
             // TODO: Put other data here too
         });
         console.log(usb_devices);
