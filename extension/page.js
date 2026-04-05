@@ -129,22 +129,32 @@
             return this.#packets;
         }
     };
+
+    // "Global" objects and event handling
+
+    // TODO
+    window.USBConnectionEvent = class extends Event {
+        get foo() {
+            return "foo!";
+        }
+    };
+
+    let allow_usb_to_construct = true;
+    window.USB = class extends EventTarget {
+        constructor() {
+            if (!allow_usb_to_construct) {
+                throw new TypeError("Illegal constructor");
+            }
+            super();
+        }
+        async test(x) {
+            console.log("test?");
+            console.log(await window.__awawausb_send_request({
+                type: "echo",
+                msg: x,
+            }));
+        }
+    };
+    navigator.usb = new USB();
+    allow_usb_to_construct = false;
 })();
-
-class USBConnectionEvent extends Event {
-    get foo() {
-        return "foo!";
-    }
-}
-
-class USB extends EventTarget {
-    async test(x) {
-        console.log("test?");
-        console.log(await window.__awawausb_send_request({
-            type: "echo",
-            msg: x,
-        }));
-    }
-}
-
-navigator.usb = new USB();
