@@ -60,8 +60,10 @@ pub struct USBDevice {
     pub serial_number: Option<String>,
 
     pub current_configuration_id: u8,
+    pub current_alt_settings: HashMap<u8, u8>,
 
     _macos_dev: IOUSBDeviceStruct,
+    _macos_ifaces: Vec<IOUSBInterfaceStruct>,
 }
 impl USBDevice {
     #[allow(non_snake_case)]
@@ -131,6 +133,43 @@ impl USBDevice {
         // Get current state
         // TODO: Does this generate unnecessary wakes and/or bus traffic?
         let current_config = usb_dev.GetConfiguration().ok()?;
+        let mut alt_settings = HashMap::new();
+
+        // Open interfaces
+        let mut ifaces = Vec::new();
+        let iter_ifaces = usb_dev
+            .CreateInterfaceIterator(&IOUSBFindInterfaceRequest {
+                bInterfaceClass: 0xffff,
+                bInterfaceSubClass: 0xffff,
+                bInterfaceProtocol: 0xffff,
+                bAlternateSetting: 0xffff,
+            })
+            .ok()?;
+
+        let mut iface_iokit;
+        loop {
+            iface_iokit = unsafe { IOIteratorNext(iter_ifaces) };
+            if iface_iokit.0 == 0 {
+                break;
+            }
+
+            // Takes ownership
+            let usb_iface = unsafe { IOUSBInterfaceStruct::new(iface_iokit) };
+
+            // NOTE: The macOS SDK documentation is either wrong or confusing.
+            // The GetInterfaceNumber function indeed returns the bInterfaceNumber
+            // which you might expect. It does *not* return a plain 0-based index
+            // according to the ordering of the config descriptor.
+            let iface_num = usb_iface.GetInterfaceNumber().ok()?;
+            let alt_setting = usb_iface.GetAlternateSetting().ok()?;
+            let old = alt_settings.insert(iface_num, alt_setting);
+            if old.is_some() {
+                log::warn!("Duplicate interface?? {}", iface_num);
+            }
+
+            ifaces.push(usb_iface);
+        }
+        unsafe { IOObjectRelease(iter_ifaces) };
 
         Some(USBDevice {
             device_descriptor: dev_desc,
@@ -140,8 +179,10 @@ impl USBDevice {
             serial_number: str_sn,
 
             current_configuration_id: current_config,
+            current_alt_settings: alt_settings,
 
             _macos_dev: usb_dev,
+            _macos_ifaces: ifaces,
         })
     }
 }
@@ -497,6 +538,28 @@ impl USBStubEngine {
                                 }
                                 usb_ch9::DescriptorRef::Interface(d) => {
                                     if let Some(this_config_desc) = &mut this_config_desc {
+                                        let current_alt_setting = if this_config_desc
+                                            .bConfigurationValue
+                                            == usb_dev.current_configuration_id
+                                        {
+                                            let current_alt_setting = usb_dev
+                                                .current_alt_settings
+                                                .get(&d.bInterfaceNumber);
+                                            match current_alt_setting {
+                                                Some(x) => *x,
+                                                None => {
+                                                    log::warn!(
+                                                        "Descriptor has an interface 0x{:02x} we don't know about",
+                                                        d.bInterfaceNumber
+                                                    );
+                                                    0
+                                                }
+                                            }
+                                        } else {
+                                            // If the configuration isn't active, default the alt setting to 0
+                                            0
+                                        };
+
                                         this_config_desc.interfaces.push(
                                             protocol::DeviceInterface {
                                                 bInterfaceNumber: d.bInterfaceNumber,
@@ -506,6 +569,7 @@ impl USBStubEngine {
                                                 bInterfaceProtocol: d.bInterfaceProtocol,
                                                 iInterface: d.iInterface,
 
+                                                current_alt_setting,
                                                 endpoints: Vec::new(),
                                             },
                                         );

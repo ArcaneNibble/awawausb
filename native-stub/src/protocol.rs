@@ -41,6 +41,7 @@ pub struct DeviceInterface {
     pub bInterfaceProtocol: u8,
     pub iInterface: u8,
 
+    pub current_alt_setting: u8,
     pub endpoints: Vec<DeviceEndpoint>,
 }
 

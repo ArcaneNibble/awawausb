@@ -177,6 +177,10 @@ nativeport.onMessage.addListener(async (m) => {
                 }
 
                 let intf_obj = interfaces[binterface_to_idx.get(intf.bInterfaceNumber)];
+                if (intf_obj.current_alt_setting !== undefined && intf_obj.current_alt_setting !== intf.current_alt_setting) {
+                    console.warn("Something fucky with alt settings?", intf.bInterfaceNumber, intf.bAlternateSetting);
+                }
+                intf_obj.current_alt_setting = intf.current_alt_setting;
                 intf_obj.alts.push({
                     bAlternateSetting: intf.bAlternateSetting,
                     bInterfaceClass: intf.bInterfaceClass,

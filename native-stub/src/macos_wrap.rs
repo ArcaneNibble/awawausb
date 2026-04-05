@@ -94,7 +94,7 @@ pub fn get_session_id(obj: io_object_t) -> Option<u64> {
 
 #[derive(Debug)]
 pub struct IOUSBDeviceStruct(
-    pub(crate) *mut *const IOUSBDeviceStruct320,
+    *mut *const IOUSBDeviceStruct320,
     pub(crate) *const Cell<usize>,
 );
 #[allow(non_snake_case)]
@@ -206,6 +206,16 @@ impl IOUSBDeviceStruct {
     pub fn GetConfiguration(&self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetConfiguration)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
+
+    pub fn CreateInterfaceIterator(
+        &self,
+        find: &IOUSBFindInterfaceRequest,
+    ) -> Result<io_object_t, kern_return_t> {
+        let mut out = io_object_t(0);
+        let ret =
+            unsafe { ((**self.0).CreateInterfaceIterator)(self.0 as *const (), find, &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
 
@@ -321,6 +331,7 @@ impl Drop for IOUSBDeviceStruct {
 
 #[derive(Debug)]
 pub struct IOUSBInterfaceStruct(*mut *const IOUSBInterfaceStruct197);
+#[allow(non_snake_case)]
 impl IOUSBInterfaceStruct {
     /// Turns an IOKit io_object_t into a USB interface interface
     ///
@@ -359,6 +370,17 @@ impl IOUSBInterfaceStruct {
 
             Self(device as *mut *const IOUSBInterfaceStruct197)
         }
+    }
+
+    pub fn GetInterfaceNumber(&self) -> Result<u8, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).GetInterfaceNumber)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
+    pub fn GetAlternateSetting(&self) -> Result<u8, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).GetAlternateSetting)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
     }
 }
 impl Drop for IOUSBInterfaceStruct {
