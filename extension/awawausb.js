@@ -10,6 +10,8 @@ nativeport.onDisconnect.addListener((p) => {
     console.warn("Native process disconnected!", p.error);
 })
 
+const WEBUSB_PLATFORM_CAPABILITY = [0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x47, 0x8B, 0xFD, 0xA0, 0x76, 0x88, 0x15, 0xB6, 0x65];
+
 // All USB devices we possibly know about, indexed by session ID
 let usb_devices = new Map();
 
@@ -200,7 +202,98 @@ nativeport.onMessage.addListener(async (m) => {
             });
         }
 
-        // TODO: BOS, WebUSB descriptors
+        // Try to query the WebUSB descriptors
+        // TODO: Do we need quirks here?
+        let try_webusb = undefined;
+        let webusb_landing_page = undefined;
+        async function try_get_bos_desc() {
+            try {
+                // Fetch the BOS descriptor
+                let initial_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0f00, 0, 5);
+                if (initial_desc.data.length < 5 || initial_desc.data[1] != 0x0f) return;
+                let actual_len = (initial_desc.data[3] << 8) | initial_desc.data[2];
+
+                let bos_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0f00, 0, actual_len);
+                if (bos_desc.data.length != actual_len || bos_desc.data[1] != 0x0f) return;
+
+                let offs = 5;
+                while (offs < bos_desc.data.length - 2) {
+                    const desc_len = bos_desc.data[offs];
+                    const desc_ty = bos_desc.data[offs + 1];
+
+                    // XXX the desc_len check may have to change if this descriptor ever gets an update
+                    if (desc_len >= 24 && desc_ty == 16 && bos_desc.data[offs + 2] == 5) {
+                        // Platform capability descriptor
+                        const uuid = new Uint8Array(bos_desc.data.buffer, offs + 4, 16);
+
+                        // Compare UUID
+                        let is_webusb = true;
+                        for (let i = 0; i < 16; i++) {
+                            if (uuid[i] != WEBUSB_PLATFORM_CAPABILITY[i]) {
+                                is_webusb = false;
+                                break;
+                            }
+                        }
+
+                        if (is_webusb) {
+                            let bcdVersion = (bos_desc.data[offs + 20 + 1] << 8) | bos_desc.data[offs + 20];
+                            let bVendorCode = bos_desc.data[offs + 20 + 2];
+                            let iLandingPage = bos_desc.data[offs + 20 + 3];
+
+                            if (bcdVersion == 0x0100) {
+                                try_webusb = {
+                                    bVendorCode,
+                                    iLandingPage
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    offs += desc_len;
+                }
+            } catch (e) {
+                console.log("BOS descriptor fetch failed!", e);
+            }
+        }
+        async function try_get_webusb_desc() {
+            try {
+                // Fetch the URL descriptor
+                let initial_desc = await internal_perform_control_transfer(sid,
+                    0xC0, try_webusb.bVendorCode, try_webusb.iLandingPage, 2, 3);
+                if (initial_desc.data.length < 3 || initial_desc.data[1] != 0x03) return;
+                let actual_len = initial_desc.data[0];
+
+                let url_desc = await internal_perform_control_transfer(sid,
+                    0xC0, try_webusb.bVendorCode, try_webusb.iLandingPage, 2, actual_len);
+                if (url_desc.data.length != actual_len || url_desc.data[1] != 0x03) return;
+
+                let ret = "";
+                if (url_desc.data[2] == 0)
+                    ret += "http://";
+                else if (url_desc.data[2] == 1)
+                    ret += "https://";
+                else {
+                    console.log("WebUSB descriptor unknown scheme!", url_desc.data[2]);
+                    return;
+                }
+                let url = new Uint8Array(url_desc.data.buffer, 3);
+                ret += new TextDecoder().decode(url);
+                webusb_landing_page = ret;
+            } catch (e) {
+                console.log("WebUSB descriptor fetch failed!", e);
+            }
+        }
+        if (m.bcdUSB >= 0x0201) {
+            await try_get_bos_desc();
+            if (try_webusb !== undefined) {
+                await try_get_webusb_desc();
+            }
+        }
+
+        if (webusb_landing_page !== undefined) {
+            console.log("TODO: WebUSB landing page", webusb_landing_page);
+        }
 
         usb_devices.set(sid, {
             bcdUSB: m.bcdUSB,
