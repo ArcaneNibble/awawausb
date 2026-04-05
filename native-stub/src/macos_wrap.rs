@@ -203,6 +203,11 @@ impl IOUSBDeviceStruct {
         };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
+    pub fn GetConfiguration(&self) -> Result<u8, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).GetConfiguration)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
 
     pub fn ctrl_xfer(
         &self,

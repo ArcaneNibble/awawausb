@@ -25,6 +25,13 @@ pub enum Errors {
 
 #[allow(non_snake_case)]
 #[derive(Serialize)]
+pub struct DeviceConfiguration {
+    pub bConfigurationValue: u8,
+    pub iConfiguration: u8,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ResponseMessage {
     EchoResponse {
@@ -43,6 +50,9 @@ pub enum ResponseMessage {
         manufacturer: Option<String>,
         product: Option<String>,
         serial: Option<String>,
+
+        current_config: u8,
+        configs: Vec<DeviceConfiguration>,
     },
     UnplugDevice {
         sid: String,

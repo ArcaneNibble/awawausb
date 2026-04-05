@@ -58,6 +58,9 @@ pub struct USBDevice {
     pub vendor_name: Option<String>,
     pub product_name: Option<String>,
     pub serial_number: Option<String>,
+
+    pub current_configuration_id: u8,
+
     _macos: IOUSBDeviceStruct,
 }
 impl USBDevice {
@@ -125,12 +128,19 @@ impl USBDevice {
             config_descs.push(config_desc.to_owned());
         }
 
+        // Get current state
+        // TODO: Does this generate unnecessary wakes and/or bus traffic?
+        let current_config = usb_dev.GetConfiguration().ok()?;
+
         Some(USBDevice {
             device_descriptor: dev_desc,
             config_descriptors: config_descs,
             vendor_name: str_manuf,
             product_name: str_product,
             serial_number: str_sn,
+
+            current_configuration_id: current_config,
+
             _macos: usb_dev,
         })
     }
@@ -466,6 +476,44 @@ impl USBStubEngine {
 
                 if let Some(usb_dev) = USBDevice::setup(item, self_) {
                     // Prepare notification (before we stuff the object away)
+                    let mut configs = Vec::new();
+                    for cfg_desc in &usb_dev.config_descriptors {
+                        let mut this_config_desc = None;
+                        for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
+                            match desc {
+                                usb_ch9::DescriptorRef::Config(d) => {
+                                    if this_config_desc.is_some() {
+                                        log::warn!(
+                                            "Bogus extra configuration descriptor? {:?}",
+                                            desc
+                                        )
+                                    } else {
+                                        this_config_desc = Some(protocol::DeviceConfiguration {
+                                            bConfigurationValue: d.bConfigurationValue,
+                                            iConfiguration: d.iConfiguration,
+                                        });
+                                    }
+                                }
+                                // usb_ch9::DescriptorRef::String(string_descriptor) => todo!(),
+                                // usb_ch9::DescriptorRef::Interface(interface_descriptor) => todo!(),
+                                // usb_ch9::DescriptorRef::Endpoint(endpoint_descriptor) => todo!(),
+                                // usb_ch9::DescriptorRef::UnknownDescriptor(items) => todo!(),
+                                _ => {}
+                            }
+                            // eprintln!("{:x?}", desc);
+                        }
+
+                        if this_config_desc.is_none() {
+                            log::warn!("Bogus configuration descriptor??");
+                            // Put a dummy value in
+                            this_config_desc = Some(protocol::DeviceConfiguration {
+                                bConfigurationValue: 0,
+                                iConfiguration: 0,
+                            });
+                        }
+
+                        configs.push(this_config_desc.unwrap());
+                    }
                     let notif = protocol::ResponseMessage::NewDevice {
                         sid: sessionid.to_string(),
 
@@ -479,6 +527,9 @@ impl USBStubEngine {
                         manufacturer: usb_dev.vendor_name.clone(),
                         product: usb_dev.product_name.clone(),
                         serial: usb_dev.serial_number.clone(),
+
+                        current_config: usb_dev.current_configuration_id,
+                        configs,
                     };
 
                     let mut devices = self_.usb_devices.borrow_mut();

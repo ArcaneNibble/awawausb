@@ -89,13 +89,70 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         // Query extra data
-        // TODO: Query actually useful data
-        let ret = await internal_perform_control_transfer(sid, 0xC0, 'e'.charCodeAt(0), 0, 0, 4, 0);
-        console.log("ret", ret);
-        ret = await internal_perform_control_transfer(sid, 0x40, 'E'.charCodeAt(0), 0, 0, new Uint8Array([11, 22, 33, 44]));
-        console.log("ret", ret);
-        ret = await internal_perform_control_transfer(sid, 0xC0, 'E'.charCodeAt(0), 0, 0, 4);
-        console.log("ret", ret);
+        // We try as hard as possible to *not* generate unnecessary traffic,
+        // but sometimes we can't avoid it (need strings, need webusb descriptor).
+
+        // undefined -> we haven't tried to query it yet
+        // null -> we tried to query it, but something went wrong
+        // u16 -> use this language
+        let usb_lang_id = undefined;
+        async function get_lang_id() {
+            console.log("query lang id");
+            if (usb_lang_id === undefined) {
+                // Query the langid string descriptor
+                let langid_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300, 0, 4);
+                if (langid_desc.data.length < 4 || langid_desc.data[1] != 0x03) {
+                    usb_lang_id = null;
+                } else {
+                    usb_lang_id = (langid_desc.data[3] << 8) | langid_desc.data[2];
+                }
+                return usb_lang_id;
+            } else {
+                return usb_lang_id;
+            }
+        }
+
+        async function get_string_desc(idx) {
+            let langid = await get_lang_id();
+            if (langid === null) return null;
+            console.log("get string desc", idx, langid);
+
+            let initial_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, 4);
+            if (initial_desc.data.length < 2 || initial_desc.data[1] != 0x03) return null;
+            let actual_len = initial_desc.data[0];
+
+            let string_desc = await internal_perform_control_transfer(sid, 0x80, 6, 0x0300 | idx, langid, actual_len);
+            if (string_desc.data.length != actual_len || string_desc.data[1] != 0x03) return null;
+
+            let str = "";
+            let dv = new DataView(string_desc.data.buffer);
+            for (let i = 2; i < string_desc.data.length; i += 2) {
+                str += String.fromCharCode(dv.getUint16(i, true));
+            }
+            return str;
+        }
+
+        // // TODO: Query actually useful data
+        // let ret = await internal_perform_control_transfer(sid, 0xC0, 'e'.charCodeAt(0), 0, 0, 4, 0);
+        // console.log("ret", ret);
+        // ret = await internal_perform_control_transfer(sid, 0x40, 'E'.charCodeAt(0), 0, 0, new Uint8Array([11, 22, 33, 44]));
+        // console.log("ret", ret);
+        // ret = await internal_perform_control_transfer(sid, 0xC0, 'E'.charCodeAt(0), 0, 0, 4);
+        // console.log("ret", ret);
+
+        let configs = new Array();
+        for (let cfg of m.configs) {
+            let config_name = null;
+            if (cfg.iConfiguration !== 0) {
+                console.log("need to get string!", cfg.iConfiguration, cfg.bConfigurationValue);
+                config_name = await get_string_desc(cfg.iConfiguration);
+            }
+
+            configs.push({
+                bConfigurationValue: cfg.bConfigurationValue,
+                config_name,
+            });
+        }
 
         usb_devices.set(sid, {
             bcdUSB: m.bcdUSB,
@@ -108,6 +165,9 @@ nativeport.onMessage.addListener(async (m) => {
             manufacturer: m.manufacturer,
             product: m.product,
             serial: m.serial,
+
+            current_config: m.current_config,
+            configs,
             // TODO: Put other data here too
         });
         console.log(usb_devices);
