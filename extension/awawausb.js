@@ -4,6 +4,13 @@
 // maintaining all global state related to USB.
 // It launches _once_ and maintains _one_ connection to the native stub.
 
+// Open the debugging page
+browser.browserAction.onClicked.addListener(() => {
+    browser.tabs.create({
+        url: "/debug-page/debug.html"
+    });
+});
+
 // Connection to native stub
 let nativeport = browser.runtime.connectNative("awawausb_native_stub");
 nativeport.onDisconnect.addListener((p) => {
@@ -64,6 +71,27 @@ function internal_perform_control_transfer(
 let page_ports = new Map();
 let next_port_id = 1;
 browser.runtime.onConnect.addListener((p) => {
+    // These are *internal* pages which have special permissions
+    if (p.sender.id === "awawausb@arcanenibble.com" && p.sender.url.startsWith("moz-extension://")) {
+        if (p.sender.url.endsWith("/debug-page/debug.html")) {
+            p.onMessage.addListener((m) => {
+                if (m === "list_devices") {
+                    p.postMessage({
+                        type: m,
+                        devices: usb_devices,
+                    })
+                } else {
+                    console.warn("Debug page sent bad request!", m)
+                }
+                // nativeport.postMessage({
+                //     "type": "EchoTest",
+                //     "msg": m.toString(),
+                // });
+            });
+        }
+        return;
+    }
+
     let this_port_id = next_port_id++;
     console.log("new page port!", this_port_id, p.sender);
     page_ports.set(this_port_id, p);
@@ -84,7 +112,7 @@ browser.runtime.onConnect.addListener((p) => {
 
 // Handle replies (and notifications) from native process
 nativeport.onMessage.addListener(async (m) => {
-    if (m.type == "NewDevice") {
+    if (m.type === "NewDevice") {
         let sid = m.sid;
         if (usb_devices.has(sid)) {
             console.warn("Duplicate device??", sid);
@@ -312,7 +340,7 @@ nativeport.onMessage.addListener(async (m) => {
             // TODO: Put other data here too
         });
         console.log(usb_devices);
-    } else if (m.type == "UnplugDevice") {
+    } else if (m.type === "UnplugDevice") {
         let sid = m.sid;
         let device = usb_devices.get(sid);
         if (device === undefined) {
@@ -322,7 +350,7 @@ nativeport.onMessage.addListener(async (m) => {
         // TODO: Probably abort all outstanding transactions?
         usb_devices.delete(sid);
         console.log(usb_devices);
-    } else if (m.type == "RequestComplete") {
+    } else if (m.type === "RequestComplete") {
         let data = undefined;
         if (m.data !== null && m.data !== undefined) {
             data = Uint8Array.fromBase64(m.data, { alphabet: "base64url" });
@@ -347,7 +375,7 @@ nativeport.onMessage.addListener(async (m) => {
         } else {
             // TODO: Requests directed at pages
         }
-    } else if (m.type == "RequestError") {
+    } else if (m.type === "RequestError") {
         let txn_id = m.txn_id;
         let txn = usb_txns.get(txn_id);
         if (txn === undefined) {

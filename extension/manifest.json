@@ -11,6 +11,10 @@
     }
   },
 
+  "browser_action": {
+    "default_icon": "icons/browser-action.png"
+  },
+
   "content_scripts": [
     {
       "all_frames": true,
