@@ -23,6 +23,7 @@ pub enum Errors {
     TransferError,
 }
 
+#[allow(non_snake_case)]
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ResponseMessage {
@@ -31,6 +32,17 @@ pub enum ResponseMessage {
     },
     NewDevice {
         sid: String,
+
+        bcdUSB: u16,
+        bDeviceClass: u8,
+        bDeviceSubClass: u8,
+        bDeviceProtocol: u8,
+        idVendor: u16,
+        idProduct: u16,
+        bcdDevice: u16,
+        manufacturer: Option<String>,
+        product: Option<String>,
+        serial: Option<String>,
     },
     UnplugDevice {
         sid: String,

@@ -465,6 +465,22 @@ impl USBStubEngine {
                 log::debug!("plug, session = 0x{:x}", sessionid);
 
                 if let Some(usb_dev) = USBDevice::setup(item, self_) {
+                    // Prepare notification (before we stuff the object away)
+                    let notif = protocol::ResponseMessage::NewDevice {
+                        sid: sessionid.to_string(),
+
+                        bcdUSB: usb_dev.device_descriptor.bcdUSB,
+                        bDeviceClass: usb_dev.device_descriptor.bDeviceClass,
+                        bDeviceSubClass: usb_dev.device_descriptor.bDeviceSubClass,
+                        bDeviceProtocol: usb_dev.device_descriptor.bDeviceProtocol,
+                        idVendor: usb_dev.device_descriptor.idVendor,
+                        idProduct: usb_dev.device_descriptor.idProduct,
+                        bcdDevice: usb_dev.device_descriptor.bcdDevice,
+                        manufacturer: usb_dev.vendor_name.clone(),
+                        product: usb_dev.product_name.clone(),
+                        serial: usb_dev.serial_number.clone(),
+                    };
+
                     let mut devices = self_.usb_devices.borrow_mut();
                     let old_dev = devices.insert(sessionid, usb_dev);
                     if old_dev.is_some() {
@@ -472,9 +488,6 @@ impl USBStubEngine {
                     }
 
                     // Send notification
-                    let notif = protocol::ResponseMessage::NewDevice {
-                        sid: sessionid.to_string(),
-                    };
                     let notif = serde_json::to_string(&notif).unwrap();
                     write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
                 } else {

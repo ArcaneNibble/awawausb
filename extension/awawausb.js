@@ -31,12 +31,10 @@ function internal_perform_control_transfer(
         resolve = res;
         reject = rej;
     });
-    console.log(promise, resolve, reject);
 
     let this_txn_id = usb_global_txn++;
     let txn_id = `0-${this_txn_id}`;
     usb_txns.set(txn_id, [resolve, reject]);
-    console.log(usb_txns);
 
     let obj = {
         _timeout_internal: timeout,
@@ -67,12 +65,10 @@ browser.runtime.onConnect.addListener((p) => {
     let this_port_id = next_port_id++;
     console.log("new page port!", this_port_id, p.sender);
     page_ports.set(this_port_id, p);
-    console.log(page_ports);
 
     p.onDisconnect.addListener((_p) => {
         console.log("page port disconnected!", this_port_id);
         page_ports.delete(this_port_id);
-        console.log(page_ports);
     });
 
     p.onMessage.addListener((m) => {
@@ -86,7 +82,6 @@ browser.runtime.onConnect.addListener((p) => {
 
 // Handle replies (and notifications) from native process
 nativeport.onMessage.addListener(async (m) => {
-    console.log("reply from native", m);
     if (m.type == "NewDevice") {
         let sid = m.sid;
         if (usb_devices.has(sid)) {
@@ -103,7 +98,17 @@ nativeport.onMessage.addListener(async (m) => {
         console.log("ret", ret);
 
         usb_devices.set(sid, {
-            // TODO: Put useful data here
+            bcdUSB: m.bcdUSB,
+            bDeviceClass: m.bDeviceClass,
+            bDeviceSubClass: m.bDeviceSubClass,
+            bDeviceProtocol: m.bDeviceProtocol,
+            idVendor: m.idVendor,
+            idProduct: m.idProduct,
+            bcdDevice: m.bcdDevice,
+            manufacturer: m.manufacturer,
+            product: m.product,
+            serial: m.serial,
+            // TODO: Put other data here too
         });
         console.log(usb_devices);
     } else if (m.type == "UnplugDevice") {
@@ -141,5 +146,7 @@ nativeport.onMessage.addListener(async (m) => {
         } else {
             // TODO: Requests directed at pages
         }
+    } else {
+        console.log("Unexpected reply from native stub!", m);
     }
 })
