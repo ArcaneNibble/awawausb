@@ -83,10 +83,6 @@ browser.runtime.onConnect.addListener((p) => {
                 } else {
                     console.warn("Debug page sent bad request!", m)
                 }
-                // nativeport.postMessage({
-                //     "type": "EchoTest",
-                //     "msg": m.toString(),
-                // });
             });
         }
         return;
