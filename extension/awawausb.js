@@ -80,6 +80,27 @@ browser.runtime.onConnect.addListener((p) => {
                         type: m,
                         devices: usb_devices,
                     })
+                } else if (m === "list_pages") {
+                    let pages = new Array();
+                    for (let [page_id, p] of page_ports) {
+                        pages.push({
+                            page_id,
+                            url: p.sender.url,
+                        });
+                    }
+                    p.postMessage({
+                        type: m,
+                        pages,
+                    });
+                } else if (m === "list_txns") {
+                    let txns = new Array();
+                    for (let txn_id of usb_txns.keys()) {
+                        txns.push(txn_id);
+                    }
+                    p.postMessage({
+                        type: m,
+                        txns,
+                    });
                 } else {
                     console.warn("Debug page sent bad request!", m)
                 }
@@ -121,7 +142,7 @@ browser.runtime.onConnect.addListener((p) => {
             sid: m,
             txn_id,
             request_type: 0xc0,
-            request: 'E'.charCodeAt(0),
+            request: 'e'.charCodeAt(0),
             value: 0,
             index: 0,
             length: 4,

@@ -36,3 +36,7 @@ summary {
     margin: 1px 0;
     padding-inline-start: 2px;
 }
+
+button:not(:nth-of-type(1)) {
+    margin-top: 1em;
+}

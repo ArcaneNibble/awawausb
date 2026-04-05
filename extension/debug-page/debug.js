@@ -1,6 +1,8 @@
 let port = browser.runtime.connect();
 
 let list_devices_ul = document.getElementById("list_of_devices");
+let list_pages_ol = document.getElementById("list_of_pages");
+let list_txns_ol = document.getElementById("list_of_txns");
 
 function make_row(desc, val) {
     let tr = document.createElement('tr');
@@ -154,9 +156,36 @@ port.onMessage.addListener((m) => {
                 }
             }
         }
+    } else if (m.type === "list_pages") {
+        list_pages_ol.replaceChildren();
+
+        let sorted_pages = m.pages.toSorted((a, b) => a[0] - b[0]);
+        for (let page_ent of sorted_pages) {
+            let li = document.createElement('li');
+            li.value = page_ent.page_id;
+            li.innerText = page_ent.url;
+            list_pages_ol.appendChild(li);
+        }
+    } else if (m.type === "list_txns") {
+        console.log(m);
+        list_of_txns.replaceChildren();
+
+        for (let txn_id of m.txns) {
+            let li = document.createElement('li');
+            li.innerText = txn_id;
+            list_of_txns.appendChild(li);
+        }
     }
 });
 
 document.getElementById("list_devices").addEventListener('click', () => {
     port.postMessage("list_devices");
+});
+
+document.getElementById("list_pages").addEventListener('click', () => {
+    port.postMessage("list_pages");
+});
+
+document.getElementById("list_txns").addEventListener('click', () => {
+    port.postMessage("list_txns");
 });
