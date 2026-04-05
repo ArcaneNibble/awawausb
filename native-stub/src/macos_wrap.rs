@@ -269,52 +269,6 @@ impl IOUSBDeviceStruct {
         };
         if ret != 0 { Err(ret) } else { Ok(()) }
     }
-
-    pub fn test(&self) {
-        let mut lib_ver = 0;
-        let mut fam_ver = 0;
-        let ret = unsafe {
-            ((**self.0).GetIOUSBLibVersion)(self.0 as *const (), &mut lib_ver, &mut fam_ver)
-        };
-        assert_eq!(ret, 0);
-        println!("{:08x} {:08x}", lib_ver, fam_ver);
-
-        // iterator
-        let iter_ifaces = IOUSBFindInterfaceRequest {
-            bInterfaceClass: 0xffff,
-            bInterfaceSubClass: 0xffff,
-            bInterfaceProtocol: 0xffff,
-            bAlternateSetting: 0xffff,
-        };
-        let mut iface_iter_obj = io_object_t(0);
-        let ret = unsafe {
-            ((**self.0).CreateInterfaceIterator)(
-                self.0 as *const (),
-                &iter_ifaces,
-                &mut iface_iter_obj,
-            )
-        };
-        assert_eq!(ret, 0);
-        println!("iface iterator {:?}", iface_iter_obj);
-
-        let mut iface_iokit;
-        loop {
-            iface_iokit = unsafe { IOIteratorNext(iface_iter_obj) };
-            if iface_iokit.0 == 0 {
-                break;
-            }
-
-            let iface = unsafe { IOUSBInterfaceStruct::new(iface_iokit) };
-
-            let mut lib_ver = 0;
-            let mut fam_ver = 0;
-            let ret = unsafe {
-                ((**iface.0).GetIOUSBLibVersion)(iface.0 as *const (), &mut lib_ver, &mut fam_ver)
-            };
-            assert_eq!(ret, 0);
-            println!("{:08x} {:08x}", lib_ver, fam_ver);
-        }
-    }
 }
 impl Drop for IOUSBDeviceStruct {
     fn drop(&mut self) {
