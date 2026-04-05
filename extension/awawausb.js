@@ -49,7 +49,7 @@ function internal_perform_control_transfer(
         _timeout_internal: timeout,
         type: "ControlTransfer",
         sid: sid,
-        txn_id: txn_id,
+        txn_id,
         request_type,
         request,
         value,
@@ -92,6 +92,10 @@ browser.runtime.onConnect.addListener((p) => {
     console.log("new page port!", this_port_id, p.sender);
     page_ports.set(this_port_id, p);
 
+    // This is a port-locally-scoped transaction ID
+    // TODO: We probably need to generate this *from the page*
+    let port_txn_id = 0;
+
     p.onDisconnect.addListener((_p) => {
         console.log("page port disconnected!", this_port_id);
         page_ports.delete(this_port_id);
@@ -99,11 +103,30 @@ browser.runtime.onConnect.addListener((p) => {
 
     p.onMessage.addListener((m) => {
         console.log("test from bkg", m);
-        p.postMessage(m * 2);
-        browser.windows.create({
-            type: "panel",
-            url: `/permission-page/permission.html?test=${m}`
-        });
+        // p.postMessage(m * 2);
+        // browser.windows.create({
+        //     type: "panel",
+        //     url: `/permission-page/permission.html?test=${m}`
+        // });
+
+        // Test
+        let this_txn_id = port_txn_id++;
+        let txn_id = `${this_port_id}-${this_txn_id}`;
+        // TODO: Do we need this? Can we get rid of this?
+        usb_txns.set(txn_id, true);
+
+        let obj = {
+            _timeout_internal: 0,
+            type: "ControlTransfer",
+            sid: m,
+            txn_id,
+            request_type: 0xc0,
+            request: 'E'.charCodeAt(0),
+            value: 0,
+            index: 0,
+            length: 4,
+        }
+        nativeport.postMessage(obj);
     });
 });
 
@@ -359,16 +382,24 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let [page_id, _txn_id] = txn_id.split('-');
+        let [page_id, page_txn_id] = txn_id.split('-');
         if (+page_id == 0) {
             // Request directed for internal use
             let [resolve, _reject] = txn;
             resolve({
-                data: data,
+                data,
                 babble: m.babble,
             });
         } else {
-            // TODO: Requests directed at pages
+            // Requests directed at pages
+            let page_port = page_ports.get(+page_id);
+            console.log(page_port);
+            page_port.postMessage({
+                type: "RequestComplete",
+                txn: +page_txn_id,
+                data,
+                babble: m.babble,
+            });
         }
     } else if (m.type === "RequestError") {
         let txn_id = m.txn_id;
@@ -379,13 +410,20 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let [page_id, _txn_id] = txn_id.split('-');
+        let [page_id, page_txn_id] = txn_id.split('-');
         if (+page_id == 0) {
             // Request directed for internal use
             let [_resolve, reject] = txn;
             reject(m.error);
         } else {
-            // TODO: Requests directed at pages
+            // Requests directed at pages
+            let page_port = page_ports.get(+page_id);
+            console.log(page_port);
+            page_port.postMessage({
+                type: "RequestError",
+                txn: +page_txn_id,
+                error: m.error,
+            });
         }
     } else {
         console.log("Unexpected reply from native stub!", m);

@@ -20,9 +20,9 @@ class USBConnectionEvent extends Event {
 }
 
 class USB extends EventTarget {
-    test() {
+    test(x) {
         console.log("test?");
-        window.__awawausb_send_request(123);
+        window.__awawausb_send_request(x);
     }
 }
 
