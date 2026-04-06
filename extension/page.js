@@ -13,6 +13,13 @@
     const __awawausb_send_request = window.__awawausb_send_request;
     delete window.__awawausb_send_request;
 
+    // Set up our local event dispatcher, and then hide the method
+    function notification_handler(m) {
+        console.log("notif!", m);
+    }
+    window.__awawausb_set_event_cb(notification_handler);
+    delete window.__awawausb_set_event_cb;
+
     function check_xfer_status(status) {
         if (status === "ok") {
             return;

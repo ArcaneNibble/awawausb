@@ -927,7 +927,16 @@ nativeport.onMessage.addListener(async (m) => {
             console.warn("Unplugging unknown device??", sid);
             return;
         }
+
         // TODO: Probably abort all outstanding transactions?
+        for (let page_dev of device.page_devices) {
+            console.log("poking page", page_dev);
+            page_dev.page.port.postMessage({
+                event: "unplug",
+                sid,
+            });
+        }
+
         usb_devices.delete(sid);
     } else if (m.type === "RequestComplete") {
         let data = undefined;

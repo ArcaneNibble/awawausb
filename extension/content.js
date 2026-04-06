@@ -16,10 +16,27 @@
 
 let port = browser.runtime.connect();
 
+// Hopefully this is safe and cannot be hijacked?
+// Need a way to call into page context to send events
+let page_event_cb;
+function set_page_event_cb(cb) {
+    if (page_event_cb !== undefined)
+        throw new Error("event callback already set");
+    page_event_cb = cb;
+}
+exportFunction(set_page_event_cb, window, { defineAs: "__awawausb_set_event_cb" });
+
 let txn_id = 0;
 let txn_map = new Map();
 
 port.onMessage.addListener((m) => {
+    if (m.event !== undefined) {
+        if (page_event_cb !== undefined) {
+            page_event_cb(m);
+        }
+        return;
+    }
+
     let [resolve, reject] = txn_map.get(m.txn_id);
     txn_map.delete(m.txn_id);
 
