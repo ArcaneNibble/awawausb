@@ -169,27 +169,60 @@ document.getElementById("list_pages").addEventListener('click', async () => {
         li.innerText = page_ent.url;
         list_pages_ol.appendChild(li);
 
-        let table = document.createElement('table');
-        let thead = document.createElement('thead');
-        thead.appendChild(make_row(
-            "Page device handle",
-            "Session ID",
-            "Opened?",
-            "Pending transactions",
-        ));
-        table.appendChild(thead);
-        let tbody = document.createElement('tbody');
-        for (let [handle_id, sid, opened, transactions] of page_ent.handles) {
-            let transactions_ul = document.createElement('ul');
-            for (let x of transactions) {
-                let li = document.createElement('li');
-                li.innerText = `${x.global_txn_id} (Interface ${x.intf})`;
-                transactions_ul.appendChild(li);
-            };
-            tbody.appendChild(make_row(handle_id, sid, opened, transactions_ul));
+        // Device handle table
+        {
+            let table = document.createElement('table');
+            let thead = document.createElement('thead');
+            thead.appendChild(make_row(
+                "Page device handle",
+                "Session ID",
+                "Opened?",
+                "Pending transactions",
+            ));
+            table.appendChild(thead);
+            let tbody = document.createElement('tbody');
+            for (let [handle_id, sid, opened, transactions] of page_ent.handles) {
+                let transactions_ul = document.createElement('ul');
+                for (let x of transactions) {
+                    let li = document.createElement('li');
+                    li.innerText = `${x.global_txn_id} (Interface ${x.intf})`;
+                    transactions_ul.appendChild(li);
+                };
+                tbody.appendChild(make_row(handle_id, sid, opened, transactions_ul));
+            }
+            table.appendChild(tbody);
+            li.appendChild(table);
         }
-        table.appendChild(tbody);
-        li.appendChild(table);
+
+        // Allowed devices table
+        {
+            let table = document.createElement('table');
+            let thead = document.createElement('thead');
+            thead.appendChild(make_row(
+                "VID",
+                "PID",
+                "SN",
+                "Device handles",
+            ));
+            table.appendChild(thead);
+            let tbody = document.createElement('tbody');
+            for (let [ids, devs] of page_ent.allowed_devices) {
+                let handles_ul = document.createElement('ul');
+                for (let x of devs) {
+                    let li = document.createElement('li');
+                    li.innerText = x;
+                    handles_ul.appendChild(li);
+                }
+                tbody.appendChild(make_row(
+                    `0x${to_hex(ids.vid, 4)}`,
+                    `0x${to_hex(ids.pid, 4)}`,
+                    ids.sn,
+                    handles_ul
+                ));
+            }
+            table.appendChild(tbody);
+            li.appendChild(table);
+        }
     }
 });
 

@@ -250,6 +250,36 @@ class PerPageState {
         this.port = port;
     }
 
+    // Permission storage
+    // {vid, pid, sn} => {dev_handles...}
+    allowed_devices = new Map();
+    find_allowed_device_slot(page_usb_dev) {
+        let global_usb_dev = page_usb_dev.global_usb_dev;
+        let found;
+        for (let [ids, handles] of this.allowed_devices) {
+            if (ids.vid === global_usb_dev.idVendor
+                && ids.pid === global_usb_dev.idProduct
+                && ids.sn === global_usb_dev.serial)
+            {
+                found = [ids, handles];
+                break;
+            }
+        }
+
+        if (found === undefined) {
+            let ids = {
+                vid: global_usb_dev.idVendor,
+                pid: global_usb_dev.idProduct,
+                sn: global_usb_dev.serial,
+            };
+            let handles = new Set();
+            this.allowed_devices.set(ids, handles);
+            found = [ids, handles];
+        }
+
+        return found;
+    }
+
     // Map from device handle (numeric ID) to authoritative state
     opened_devices = new Map();
     // "Reverse" map from session ID to device handle
@@ -271,6 +301,12 @@ class PerPageState {
         this.opened_devices.set(this_device_handle, page_usb_dev);
         this.#sid_to_handle.set(sid, this_device_handle);
         global_usb_dev.page_devices.add(page_usb_dev);
+
+        // Add this device to the permission storage
+        let [_, allowed_devices_slot] = this.find_allowed_device_slot(page_usb_dev);
+        allowed_devices_slot.add(this_device_handle);
+        console.log(this.allowed_devices);
+
         return [this_device_handle, page_usb_dev];
     }
 
@@ -279,6 +315,15 @@ class PerPageState {
         this.#sid_to_handle.delete(page_usb_dev.sid);
         this.opened_devices.delete(page_usb_dev.dev_handle);
         page_usb_dev.global_usb_dev.page_devices.delete(page_usb_dev);
+
+        // Remove this device from the permission storage,
+        // and also remove the key entirely if there's no SN and no device
+        let [allowed_ids, allowed_handles] = this.find_allowed_device_slot(page_usb_dev);
+        allowed_handles.delete(page_usb_dev.dev_handle);
+        if (allowed_ids.sn === null && allowed_handles.size === 0) {
+            this.allowed_devices.delete(allowed_ids);
+        }
+        console.log(this.allowed_devices);
 
         try {
             this.port.postMessage({
@@ -335,6 +380,7 @@ class PerPageState {
             ret.push({
                 page_id,
                 url: state.port.sender.url,
+                allowed_devices: state.allowed_devices,
                 handles,
             });
         }
