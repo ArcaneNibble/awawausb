@@ -546,7 +546,6 @@ browser.runtime.onConnect.addListener((p) => {
 
             let req = 0;
 
-            console.log(m);
             if (m.length !== undefined)
                 req |= 0x80;    // device-to-host
 
@@ -601,18 +600,17 @@ browser.runtime.onConnect.addListener((p) => {
                 let bytes = new Uint8Array(m.data);
                 req_obj.data = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
             }
-            console.log(req_obj);
 
             // Send the request
             usb_txns.set(global_txn_id, new PageTransaction((res) => {
                 console.log("native cb ctrl xfer", res);
                 if (!map_native_error(m.txn_id, res)) {
-                    console.log("xfer success!");
                     p.postMessage({
                         txn_id: m.txn_id,
                         success: true,
                         babble: res.babble,
                         data: res.data,
+                        bytes_written: res.bytes_written,
                     });
                 }
             }));

@@ -86,11 +86,13 @@ pub enum ResponseMessage {
     RequestError {
         txn_id: String,
         error: Errors,
+        bytes_written: u64,
     },
     RequestComplete {
         txn_id: String,
         babble: bool,
         data: Option<String>,
+        bytes_written: u64,
     },
 }
 

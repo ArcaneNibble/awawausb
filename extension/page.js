@@ -246,7 +246,6 @@
 
         async controlTransferIn(setup, length) {
             setup = check_control_xfer_params(setup);
-            console.log(setup);
             try {
                 let res = await __awawausb_send_request({
                     type: "ctrl_xfer",
@@ -255,8 +254,12 @@
                     length: length>>>0
                 });
 
-                console.log(res);
+                let data = new DataView(res.data.buffer);
+                let ok_babble = res.babble ? "babble" : "ok";
+                return new USBInTransferResult(ok_babble, data);
             } catch (e) {
+                if (e.error === "stall")
+                    return new USBInTransferResult("stall");
                 map_txn_error(e);
             }
         }
@@ -265,7 +268,6 @@
             if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
                 throw new TypeError("parameter is not a BufferSource");
             }
-            console.log(setup, data);
             try {
                 let res = await __awawausb_send_request({
                     type: "ctrl_xfer",
@@ -274,8 +276,10 @@
                     data,
                 });
 
-                console.log(res);
+                return new USBOutTransferResult("ok", res.bytes_written);
             } catch (e) {
+                if (e.error === "stall")
+                    return new USBOutTransferResult("stall", e.bytes_written);
                 map_txn_error(e);
             }
         }

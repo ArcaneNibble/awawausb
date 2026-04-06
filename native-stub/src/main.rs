@@ -335,6 +335,7 @@ impl USBStubEngine {
                 let reply = protocol::ResponseMessage::RequestError {
                     txn_id: $txn_id,
                     error: protocol::Errors::$err,
+                    bytes_written: 0,
                 };
                 let reply = serde_json::to_string(&reply).unwrap();
                 write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
@@ -347,6 +348,7 @@ impl USBStubEngine {
                     txn_id: $txn_id,
                     babble: false,
                     data: None,
+                    bytes_written: 0,
                 };
                 let reply = serde_json::to_string(&reply).unwrap();
                 write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
@@ -832,6 +834,7 @@ impl USBStubEngine {
             let notif = protocol::ResponseMessage::RequestError {
                 txn_id: xfer.txn_id,
                 error: protocol::Errors::Stall,
+                bytes_written: actual_len as u64,
             };
             let notif = serde_json::to_string(&notif).unwrap();
             write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
@@ -846,6 +849,7 @@ impl USBStubEngine {
                 txn_id: xfer.txn_id,
                 babble,
                 data,
+                bytes_written: actual_len as u64,
             };
             let notif = serde_json::to_string(&notif).unwrap();
             write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
@@ -853,6 +857,7 @@ impl USBStubEngine {
             let notif = protocol::ResponseMessage::RequestError {
                 txn_id: xfer.txn_id,
                 error: protocol::Errors::TransferError,
+                bytes_written: actual_len as u64,
             };
             let notif = serde_json::to_string(&notif).unwrap();
             write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
