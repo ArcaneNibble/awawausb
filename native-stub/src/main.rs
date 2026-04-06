@@ -59,6 +59,7 @@ pub struct USBDevice {
     pub product_name: Option<String>,
     pub serial_number: Option<String>,
 
+    pub opened: bool,
     pub current_configuration_id: u8,
     pub current_alt_settings: HashMap<u8, u8>,
 
@@ -154,7 +155,7 @@ impl USBDevice {
             }
 
             // Takes ownership
-            let usb_iface = unsafe { IOUSBInterfaceStruct::new(iface_iokit) };
+            let mut usb_iface = unsafe { IOUSBInterfaceStruct::new(iface_iokit) };
 
             // NOTE: The macOS SDK documentation is either wrong or confusing.
             // The GetInterfaceNumber function indeed returns the bInterfaceNumber
@@ -178,6 +179,7 @@ impl USBDevice {
             product_name: str_product,
             serial_number: str_sn,
 
+            opened: false,
             current_configuration_id: current_config,
             current_alt_settings: alt_settings,
 
@@ -339,6 +341,18 @@ impl USBStubEngine {
             };
         }
 
+        macro_rules! send_completion {
+            ($txn_id:expr) => {
+                let reply = protocol::ResponseMessage::RequestComplete {
+                    txn_id: $txn_id,
+                    babble: false,
+                    data: None,
+                };
+                let reply = serde_json::to_string(&reply).unwrap();
+                write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
+            };
+        }
+
         match msg_parsed {
             protocol::RequestMessage::EchoTest { msg } => {
                 let reply = protocol::ResponseMessage::EchoResponse { msg };
@@ -348,18 +362,30 @@ impl USBStubEngine {
             protocol::RequestMessage::OpenDevice { sid, txn_id } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
-                let devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get(&sid) {
-                    // TODO
-                    eprintln!("TODO: Open device");
-                    // send_error!(txn_id, TransferError);
-                    let notif = protocol::ResponseMessage::RequestComplete {
-                        txn_id,
-                        babble: false,
-                        data: None,
-                    };
-                    let notif = serde_json::to_string(&notif).unwrap();
-                    write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if usb_dev.opened {
+                        log::debug!(
+                            "Opening already opened device, sid = {}, txn = {}",
+                            sid,
+                            txn_id
+                        );
+                        send_completion!(txn_id);
+                    } else {
+                        if let Err(ret) = usb_dev._macos_dev.USBDeviceOpen() {
+                            log::warn!(
+                                "USBDeviceOpen failed, sid = {}, txn = {}, ret = {:08x} ",
+                                sid,
+                                txn_id,
+                                ret
+                            );
+                            send_error!(txn_id, TransferError);
+                        } else {
+                            // Open successful
+                            usb_dev.opened = true;
+                            send_completion!(txn_id);
+                        }
+                    }
                 } else {
                     send_error!(txn_id, DeviceNotFound);
                 }
@@ -409,8 +435,8 @@ impl USBStubEngine {
 
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
-                let devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get(&sid) {
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
                     let xfer = USBTransfer {
                         dir,
                         txn_id: txn_id.clone(),
@@ -428,7 +454,8 @@ impl USBStubEngine {
                     ) {
                         // NOTE: A removed device doesn't seem to generate errors here
                         log::warn!(
-                            "DeviceRequestAsyncTO failed, txn = {}, ret = {:08x} ",
+                            "DeviceRequestAsyncTO failed, sid = {}, txn = {}, ret = {:08x} ",
+                            sid,
                             txn_id,
                             ret
                         );

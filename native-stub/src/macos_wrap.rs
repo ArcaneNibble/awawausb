@@ -139,78 +139,86 @@ impl IOUSBDeviceStruct {
         }
     }
 
-    pub fn CreateDeviceAsyncPort(&self) -> Result<mach_port_t, kern_return_t> {
+    pub fn CreateDeviceAsyncPort(&mut self) -> Result<mach_port_t, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).CreateDeviceAsyncPort)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceClass(&self) -> Result<u8, kern_return_t> {
+    pub fn USBDeviceOpen(&mut self) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).USBDeviceOpen)(self.0 as *const ()) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+    pub fn USBDeviceClose(&mut self) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).USBDeviceClose)(self.0 as *const ()) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+    pub fn GetDeviceClass(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceClass)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceSubClass(&self) -> Result<u8, kern_return_t> {
+    pub fn GetDeviceSubClass(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceSubClass)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceProtocol(&self) -> Result<u8, kern_return_t> {
+    pub fn GetDeviceProtocol(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceProtocol)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceVendor(&self) -> Result<u16, kern_return_t> {
+    pub fn GetDeviceVendor(&mut self) -> Result<u16, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceVendor)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceProduct(&self) -> Result<u16, kern_return_t> {
+    pub fn GetDeviceProduct(&mut self) -> Result<u16, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceProduct)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetDeviceReleaseNumber(&self) -> Result<u16, kern_return_t> {
+    pub fn GetDeviceReleaseNumber(&mut self) -> Result<u16, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetDeviceReleaseNumber)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn USBGetManufacturerStringIndex(&self) -> Result<u8, kern_return_t> {
+    pub fn USBGetManufacturerStringIndex(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret =
             unsafe { ((**self.0).USBGetManufacturerStringIndex)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn USBGetProductStringIndex(&self) -> Result<u8, kern_return_t> {
+    pub fn USBGetProductStringIndex(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).USBGetProductStringIndex)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn USBGetSerialNumberStringIndex(&self) -> Result<u8, kern_return_t> {
+    pub fn USBGetSerialNumberStringIndex(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret =
             unsafe { ((**self.0).USBGetSerialNumberStringIndex)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetNumberOfConfigurations(&self) -> Result<u8, kern_return_t> {
+    pub fn GetNumberOfConfigurations(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetNumberOfConfigurations)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetConfigurationDescriptorPtr(&self, conf: u8) -> Result<*const (), kern_return_t> {
+    pub fn GetConfigurationDescriptorPtr(&mut self, conf: u8) -> Result<*const (), kern_return_t> {
         let mut out = ptr::null();
         let ret = unsafe {
             ((**self.0).GetConfigurationDescriptorPtr)(self.0 as *const (), conf, &mut out)
         };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetConfiguration(&self) -> Result<u8, kern_return_t> {
+    pub fn GetConfiguration(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetConfiguration)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
 
     pub fn CreateInterfaceIterator(
-        &self,
+        &mut self,
         find: &IOUSBFindInterfaceRequest,
     ) -> Result<io_object_t, kern_return_t> {
         let mut out = io_object_t(0);
@@ -220,7 +228,7 @@ impl IOUSBDeviceStruct {
     }
 
     pub fn ctrl_xfer(
-        &self,
+        &mut self,
         mut xfer_obj: crate::USBTransfer,
         request_type: u8,
         request: u8,
@@ -326,12 +334,12 @@ impl IOUSBInterfaceStruct {
         }
     }
 
-    pub fn GetInterfaceNumber(&self) -> Result<u8, kern_return_t> {
+    pub fn GetInterfaceNumber(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetInterfaceNumber)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
-    pub fn GetAlternateSetting(&self) -> Result<u8, kern_return_t> {
+    pub fn GetAlternateSetting(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetAlternateSetting)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
