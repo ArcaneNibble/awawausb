@@ -165,6 +165,7 @@ function close_page_device(global_txn_id, page_usb_dev, global_usb_dev) {
     if (global_usb_dev.opened === 0) {
         console.log("close global");
         // We actually have to send a request to the stub now
+        // This is not queued on the per-page device, and it cannot be aborted
         usb_txns.set(global_txn_id, new PageTransaction((res) => {
             // No errors are reported if closing fails
             if (res.type === "RequestError") {
@@ -188,6 +189,21 @@ class PerPageUSBDevice {
 
     // The following state is tracked twice: here, and in the page.
     opened = false;
+
+    transactions = new Set();
+    // Queues a transaction, both locally *and* globally.
+    // Callback will be called when it finishes
+    queue_transaction(global_txn_id, intf, cb) {
+        let txn_ref = {
+            txn_id: global_txn_id,
+            intf,
+        };
+        this.transactions.add(txn_ref);
+        usb_txns.set(global_txn_id, new PageTransaction((res) => {
+            this.transactions.delete(txn_ref);
+            cb(res);
+        }));
+    }
 }
 
 // Actual per-page state. Pages are referenced by a numeric ID,
@@ -250,7 +266,7 @@ class PerPageState {
         for (let [page_id, state] of PerPageState.#pages) {
             let handles = new Array();
             for (let [handle_id, usb_dev] of state.opened_devices) {
-                handles.push([handle_id, usb_dev.sid, usb_dev.opened]);
+                handles.push([handle_id, usb_dev.sid, usb_dev.opened, usb_dev.transactions]);
             }
             ret.push({
                 page_id,
@@ -497,7 +513,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // We actually have to send a request to the stub now
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
-            usb_txns.set(global_txn_id, new PageTransaction((res) => {
+            page_usb_dev.queue_transaction(global_txn_id, -1, (res) => {
                 console.log("native cb", res);
                 if (!map_native_error(m.txn_id, res)) {
                     // The open was (finally) successful
@@ -510,7 +526,7 @@ browser.runtime.onConnect.addListener((p) => {
                         success: true,
                     });
                 }
-            }));
+            });
             nativeport.postMessage({
                 type: "OpenDevice",
                 sid: page_usb_dev.sid,
@@ -602,7 +618,7 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // Send the request
-            usb_txns.set(global_txn_id, new PageTransaction((res) => {
+            page_usb_dev.queue_transaction(global_txn_id, -1, (res) => {
                 console.log("native cb ctrl xfer", res);
                 if (!map_native_error(m.txn_id, res)) {
                     p.postMessage({
@@ -613,7 +629,7 @@ browser.runtime.onConnect.addListener((p) => {
                         bytes_written: res.bytes_written,
                     });
                 }
-            }));
+            });
             nativeport.postMessage(req_obj);
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);

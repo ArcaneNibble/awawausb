@@ -160,11 +160,22 @@ port.onMessage.addListener((m) => {
 
             let table = document.createElement('table');
             let thead = document.createElement('thead');
-            thead.appendChild(make_row("Page device handle", "Session ID", "Opened?"));
+            thead.appendChild(make_row(
+                "Page device handle",
+                "Session ID",
+                "Opened?",
+                "Pending transactions",
+            ));
             table.appendChild(thead);
             let tbody = document.createElement('tbody');
-            for (let fields of page_ent.handles) {
-                tbody.appendChild(make_row(...fields));
+            for (let [handle_id, sid, opened, transactions] of page_ent.handles) {
+                let transactions_ul = document.createElement('ul');
+                for (let x of transactions) {
+                    let li = document.createElement('li');
+                    li.innerText = `${x.txn_id} (Interface ${x.intf})`;
+                    transactions_ul.appendChild(li);
+                };
+                tbody.appendChild(make_row(handle_id, sid, opened, transactions_ul));
             }
             table.appendChild(tbody);
             li.appendChild(table);
