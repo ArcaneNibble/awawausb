@@ -140,10 +140,33 @@
     function map_txn_error(e) {
         if (e.error === "not_found") {
             throw new DOMException("Device unplugged or not found", "NotFoundError");
+        } else if (e.error === "not_open") {
+            throw new DOMException("Device not open or interface not claimed", "InvalidStateError");
+        } else if (e.error === "not_configured") {
+            throw new DOMException("Device not configured", "InvalidStateError");
         } else {
             console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");
         }
+    }
+
+    function check_control_xfer_params(inp) {
+        if (inp.requestType !== "standard"
+            && inp.requestType !== "class"
+            && inp.requestType !== "vendor")
+            throw new TypeError(`\`${inp.requestType}\` is not a valid USBRequestType`);
+        if (inp.recipient !== "device"
+            && inp.recipient !== "interface"
+            && inp.recipient !== "endpoint"
+            && inp.recipient !== "other")
+            throw new TypeError(`\`${inp.recipient}\` is not a valid USBRecipient`);
+        return {
+            requestType: inp.requestType,
+            recipient: inp.recipient,
+            request: inp.request,
+            value: inp.value,
+            index: inp.index,
+        };
     }
 
     // Classes for the USB devices
@@ -216,6 +239,42 @@
 
                 // Successful close?
                 this.#opened = false;
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+
+        async controlTransferIn(setup, length) {
+            setup = check_control_xfer_params(setup);
+            console.log(setup);
+            try {
+                let res = await __awawausb_send_request({
+                    type: "ctrl_xfer",
+                    dev_handle: this.#device_handle,
+                    setup,
+                    length: length>>>0
+                });
+
+                console.log(res);
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+        async controlTransferOut(setup, data) {
+            setup = check_control_xfer_params(setup);
+            if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+                throw new TypeError("parameter is not a BufferSource");
+            }
+            console.log(setup, data);
+            try {
+                let res = await __awawausb_send_request({
+                    type: "ctrl_xfer",
+                    dev_handle: this.#device_handle,
+                    setup,
+                    data,
+                });
+
+                console.log(res);
             } catch (e) {
                 map_txn_error(e);
             }

@@ -234,17 +234,12 @@ class PerPageState {
 
         // Close all devices
         let page = PerPageState.#pages.get(page_id);
-        console.log(page);
         for (let page_usb_dev of page.opened_devices.values()) {
-            console.log(page_usb_dev);
             let global_usb_dev = usb_devices.get(page_usb_dev.sid);
-            console.log(global_usb_dev);
             if (global_usb_dev === undefined) continue;
 
             let this_txn_id = usb_global_txn++;
             let txn_id = `0-${this_txn_id}`;
-
-            console.log(txn_id, page_usb_dev, global_usb_dev);
             close_page_device(txn_id, page_usb_dev, global_usb_dev);
         }
 
@@ -333,7 +328,7 @@ browser.runtime.onConnect.addListener((p) => {
     // Create and stash the per-page state
     let [this_page_id, this_page] = PerPageState.new_page(p);
 
-    function get_usb_device(m) {
+    function get_usb_device(m, check_open=false) {
         let page_usb_dev = this_page.opened_devices.get(m.dev_handle);
         if (page_usb_dev === undefined) {
             p.postMessage({
@@ -352,6 +347,25 @@ browser.runtime.onConnect.addListener((p) => {
                 error: "not_found",
             });
             return;
+        }
+
+        if (check_open) {
+            if (!page_usb_dev.opened) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+            if (global_usb_dev.current_config == 0) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_configured",
+                });
+                return;
+            }
         }
 
         return [page_usb_dev, global_usb_dev];
@@ -525,6 +539,84 @@ browser.runtime.onConnect.addListener((p) => {
                 txn_id: m.txn_id,
                 success: true,
             });
+        } else if (m.type === "ctrl_xfer") {
+            let usb_devs = get_usb_device(m, true);
+            if (usb_devs === undefined) return;
+            let [page_usb_dev, global_usb_dev] = usb_devs;
+
+            let req = 0;
+
+            console.log(m);
+            if (m.length !== undefined)
+                req |= 0x80;    // device-to-host
+
+            if (m.setup.requestType === "standard") {}
+            else if (m.setup.requestType === "class") {
+                req |= 1 << 5;
+            } else if (m.setup.requestType === "vendor") {
+                req |= 2 << 5;
+            } else {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            }
+
+            if (m.setup.recipient === "device") {}
+            else if (m.setup.recipient === "interface") {
+                // TODO
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            } else if (m.setup.recipient === "endpoint") {
+                // TODO
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            } else if (m.setup.recipient === "other") {
+                req |= 3;
+            }
+
+            // Prepare the request
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            let req_obj = {
+                type: "ControlTransfer",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                request_type: req,
+                request: m.setup.request & 0xff,
+                value: m.setup.value & 0xffff,
+                index: m.setup.index & 0xffff,
+            }
+            if (req & 0x80) {
+                // device to host
+                req_obj.length = m.length>>>0;
+            } else {
+                // host to device
+                let bytes = new Uint8Array(m.data);
+                req_obj.data = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+            }
+            console.log(req_obj);
+
+            // Send the request
+            usb_txns.set(global_txn_id, new PageTransaction((res) => {
+                console.log("native cb ctrl xfer", res);
+                if (!map_native_error(m.txn_id, res)) {
+                    console.log("xfer success!");
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                        babble: res.babble,
+                        data: res.data,
+                    });
+                }
+            }));
+            nativeport.postMessage(req_obj);
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);
             p.postMessage({
@@ -794,6 +886,7 @@ nativeport.onMessage.addListener(async (m) => {
 
         if (txn instanceof PageTransaction) {
             if (txn.alive) {
+                m.data = data;
                 txn.callback(m);
             } else {
                 console.log("Completing a dead transaction", txn_id);
