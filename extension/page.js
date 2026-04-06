@@ -137,29 +137,74 @@
     };
 
     // Classes for the USB devices
-    const DEV_DEVID = Symbol("USBDevice.device_id");
+    const DEV_HANDLE = Symbol("USBDevice.device_handle");
     // Map from numeric device handles to objects
     // (needed to maintain object equality when opening
     //  the same device over and over again)
     let dev_handle_to_obj_map = new Map();
     window.USBDevice = class {
-        #device_id
-        constructor(devid) {
+        #device_handle;
+        #device_descriptors;
+        constructor(dev_data) {
             // This song-and-dance helps to prevent user code from
             // trying to construct a USBDevice manually.
             // It's *NOT* a security boundary, since there's always
             // a chance __awawausb_send_request can leak.
-            if (devid === undefined) {
+            if (dev_data === undefined) {
                 throw new TypeError("Illegal constructor");
             }
-            let devid_ = devid[DEV_DEVID];
+            let devid_ = dev_data[DEV_HANDLE];
             if (devid_ === undefined) {
                 throw new TypeError("Illegal constructor");
             }
-            this.#device_id = devid_;
+            this.#device_handle = devid_;
+            this.#device_descriptors = dev_data.descriptors;
         }
         get test() {
-            return this.#device_id;
+            return this.#device_handle;
+        }
+
+        get usbVersionMajor() {
+            return (this.#device_descriptors.bcdUSB >> 8) & 0xff;
+        }
+        get usbVersionMinor() {
+            return (this.#device_descriptors.bcdUSB >> 4) & 0xf;
+        }
+        get usbVersionSubminor() {
+            return this.#device_descriptors.bcdUSB & 0xf;
+        }
+        get deviceClass() {
+            return this.#device_descriptors.bDeviceClass;
+        }
+        get deviceSubclass() {
+            return this.#device_descriptors.bDeviceSubClass;
+        }
+        get deviceProtocol() {
+            return this.#device_descriptors.bDeviceProtocol;
+        }
+        get vendorId() {
+            return this.#device_descriptors.idVendor;
+        }
+        get productId() {
+            return this.#device_descriptors.idProduct;
+        }
+        get deviceVersionMajor() {
+            return (this.#device_descriptors.bcdDevice >> 8) & 0xff;
+        }
+        get deviceVersionMinor() {
+            return (this.#device_descriptors.bcdDevice >> 4) & 0x4f;
+        }
+        get deviceVersionSubminor() {
+            return this.#device_descriptors.bcdDevice & 0xf;
+        }
+        get manufacturerName() {
+            return this.#device_descriptors.manufacturer;
+        }
+        get productName() {
+            return this.#device_descriptors.product;
+        }
+        get serialNumber() {
+            return this.#device_descriptors.serial;
         }
     };
 
@@ -292,9 +337,10 @@
                 if (existing_device !== undefined)
                     return existing_device;
 
-                let dev_handle = {};
-                dev_handle[DEV_DEVID] = resp.dev_handle;
-                let usb_device = new USBDevice(dev_handle);
+                let usb_device = new USBDevice({
+                    [DEV_HANDLE]: resp.dev_handle,
+                    descriptors: resp.dev_data,
+                });
                 dev_handle_to_obj_map.set(resp.dev_handle, usb_device);
                 return usb_device;
             } catch (e) {

@@ -23,6 +23,14 @@ const WEBUSB_PLATFORM_CAPABILITY = [0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x
 // XXX this structure is rather ad-hoc, because it contains a lot of Chapter-9 fields
 let usb_devices = new Map();
 
+function clean_up_usb_device_for_page(dev) {
+    let ret = structuredClone(dev);
+
+    delete ret.webusb_landing_page;
+
+    return ret;
+}
+
 // All outstanding transactions, indexed by transaction ID,
 // which is a string of the form `pageID-txnID`
 // (page ID of 0 is reserved for special global control transfers)
@@ -260,11 +268,13 @@ browser.runtime.onConnect.addListener((p) => {
             // TODO: Implement permission dialog
             let selected_sid = possible_devices[0];
 
+            let dev_data = clean_up_usb_device_for_page(usb_devices.get(selected_sid));
             let dev_handle = this_page.open_device(selected_sid);
             p.postMessage({
                 txn_id: m.txn_id,
                 success: true,
                 dev_handle,
+                dev_data,
             });
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);
