@@ -112,6 +112,8 @@ class UserPermissionDialog {
                     } else if (m.type === "get_devices") {
                         let devices = m.devices.map(sid => usb_devices.get(sid));
                         response(devices);
+                    } else {
+                        console.warn("Permission page sent bad request!", m)
                     }
                 }
             }
@@ -271,7 +273,6 @@ class PerPageState {
         this.opened_devices.set(this_device_handle, page_usb_dev);
         this.sid_to_handle.set(sid, this_device_handle);
         global_usb_dev.page_devices.add(page_usb_dev);
-        console.log(global_usb_dev);
         return [this_device_handle, page_usb_dev];
     }
 
@@ -354,45 +355,38 @@ function matches_device_filter(dev, filt) {
     return true;
 }
 
+class DebugPage {
+    static {
+        browser.runtime.onMessage.addListener((m, sender, response) => {
+            if (sender.id === EXTENSION_ID && sender.url.startsWith("moz-extension://")) {
+                if (sender.url.endsWith("/debug-page/debug.html")) {
+                    if (m === "list_devices") {
+                        let devices = new Array();
+                        for (let [sid, usb_dev] of usb_devices) {
+                            let {page_devices, ...rest} = usb_dev;
+                            page_devices = Array.from(page_devices, (x) => [x.page.page_id, x.dev_handle]);
+                            devices.push([sid, {page_devices, ...rest}]);
+                        }
+                        response(devices);
+                    } else if (m === "list_pages") {
+                        response(PerPageState.debug_pages());
+                    } else if (m === "list_txns") {
+                        let txns = new Array();
+                        for (let txn_id of usb_txns.keys()) {
+                            txns.push(txn_id);
+                        }
+                        response(txns);
+                    } else {
+                        console.warn("Debug page sent bad request!", m)
+                    }
+                }
+            }
+        });
+    }
+}
+
 // Handle requests from pages
 browser.runtime.onConnect.addListener((p) => {
-    // These are *internal* pages which have special permissions
-    if (p.sender.id === EXTENSION_ID && p.sender.url.startsWith("moz-extension://")) {
-        if (p.sender.url.endsWith("/debug-page/debug.html")) {
-            p.onMessage.addListener((m) => {
-                if (m === "list_devices") {
-                    let devices = new Array();
-                    for (let [sid, usb_dev] of usb_devices) {
-                        let {page_devices, ...rest} = usb_dev;
-                        page_devices = Array.from(page_devices, (x) => [x.page.page_id, x.dev_handle]);
-                        devices.push([sid, {page_devices, ...rest}]);
-                    }
-                    p.postMessage({
-                        type: m,
-                        devices,
-                    })
-                } else if (m === "list_pages") {
-                    p.postMessage({
-                        type: m,
-                        pages: PerPageState.debug_pages(),
-                    });
-                } else if (m === "list_txns") {
-                    let txns = new Array();
-                    for (let txn_id of usb_txns.keys()) {
-                        txns.push(txn_id);
-                    }
-                    p.postMessage({
-                        type: m,
-                        txns,
-                    });
-                } else {
-                    console.warn("Debug page sent bad request!", m)
-                }
-            });
-        }
-        return;
-    }
-
     // Create and stash the per-page state
     let [this_page_id, this_page] = PerPageState.new_page(p);
 
