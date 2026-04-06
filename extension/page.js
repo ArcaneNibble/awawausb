@@ -46,6 +46,13 @@
                 dev_handle_to_obj_map.delete(m.dev_handle);
                 the_usb_obj.dispatchEvent(new USBConnectionEvent('disconnect', {device: dev}));
             }
+        } else if (m.event === "plug") {
+            let usb_device = new USBDevice({
+                [DEV_HANDLE]: m.dev_handle,
+                descriptors: m.dev_data,
+            });
+            dev_handle_to_obj_map.set(m.dev_handle, usb_device);
+            the_usb_obj.dispatchEvent(new USBConnectionEvent('connect', {device: usb_device}));
         } else {
             console.warn("Unknown WebUSB notification", m);
         }

@@ -253,8 +253,7 @@ class PerPageState {
     // Permission storage
     // {vid, pid, sn} => {dev_handles...}
     allowed_devices = new Map();
-    find_allowed_device_slot(page_usb_dev) {
-        let global_usb_dev = page_usb_dev.global_usb_dev;
+    find_allowed_device_slot(global_usb_dev, make_hole=true) {
         let found;
         for (let [ids, handles] of this.allowed_devices) {
             if (ids.vid === global_usb_dev.idVendor
@@ -266,7 +265,7 @@ class PerPageState {
             }
         }
 
-        if (found === undefined) {
+        if (make_hole && found === undefined) {
             let ids = {
                 vid: global_usb_dev.idVendor,
                 pid: global_usb_dev.idProduct,
@@ -303,9 +302,8 @@ class PerPageState {
         global_usb_dev.page_devices.add(page_usb_dev);
 
         // Add this device to the permission storage
-        let [_, allowed_devices_slot] = this.find_allowed_device_slot(page_usb_dev);
+        let [_, allowed_devices_slot] = this.find_allowed_device_slot(global_usb_dev);
         allowed_devices_slot.add(this_device_handle);
-        console.log(this.allowed_devices);
 
         return [this_device_handle, page_usb_dev];
     }
@@ -318,12 +316,11 @@ class PerPageState {
 
         // Remove this device from the permission storage,
         // and also remove the key entirely if there's no SN and no device
-        let [allowed_ids, allowed_handles] = this.find_allowed_device_slot(page_usb_dev);
+        let [allowed_ids, allowed_handles] = this.find_allowed_device_slot(page_usb_dev.global_usb_dev);
         allowed_handles.delete(page_usb_dev.dev_handle);
         if (allowed_ids.sn === null && allowed_handles.size === 0) {
             this.allowed_devices.delete(allowed_ids);
         }
-        console.log(this.allowed_devices);
 
         try {
             this.port.postMessage({
@@ -336,6 +333,35 @@ class PerPageState {
 
         // NOTE: We don't abort any transactions. We're not told to do that.
         // Also, the stub will (should?) return them to us as failed.
+    }
+
+    // Loop through *all* pages, see if it makes sense to inject the
+    static inject_new_device(sid, global_usb_dev) {
+        for (let page of PerPageState.#pages.values()) {
+            let maybe_allowed = page.find_allowed_device_slot(global_usb_dev, false);
+            if (maybe_allowed === undefined) continue;
+
+            console.log("Injecting allowed device", sid, page.page_id);
+            let this_device_handle = page.#next_device_id++;
+            let page_usb_dev = new PerPageUSBDevice(this_device_handle, page, sid, global_usb_dev);
+            page.opened_devices.set(this_device_handle, page_usb_dev);
+            page.#sid_to_handle.set(sid, this_device_handle);
+            global_usb_dev.page_devices.add(page_usb_dev);
+
+            // Add this device to the permission storage
+            maybe_allowed[1].add(this_device_handle);
+
+            // Try to send event
+            try {
+                page.port.postMessage({
+                    event: "plug",
+                    dev_handle: this_device_handle,
+                    dev_data: page_usb_dev.clean_up_usb_device_for_page,
+                });
+            } catch (e) {
+                // Ignore notification failures
+            }
+        }
     }
 
     static #next_page_id = 1;
@@ -948,7 +974,7 @@ nativeport.onMessage.addListener(async (m) => {
             console.log("TODO: Do something WebUSB landing page", webusb_landing_page);
         }
 
-        usb_devices.set(sid, {
+        let global_usb_dev = {
             bcdUSB: m.bcdUSB,
             bDeviceClass: m.bDeviceClass,
             bDeviceSubClass: m.bDeviceSubClass,
@@ -968,7 +994,12 @@ nativeport.onMessage.addListener(async (m) => {
             webusb_landing_page,
             opened: 0,
             page_devices: new Set(),
-        });
+        };
+        usb_devices.set(sid, global_usb_dev);
+
+        // See if any pages are allowed to access this device.
+        // If so, inject a new device into them
+        PerPageState.inject_new_device(sid, global_usb_dev);
     } else if (m.type === "UnplugDevice") {
         let sid = m.sid;
         let device = usb_devices.get(sid);
