@@ -17,6 +17,7 @@ nativeport.onDisconnect.addListener((p) => {
     console.warn("Native process disconnected!", p.error);
 })
 
+const EXTENSION_ID = "awawausb@arcanenibble.com";
 const WEBUSB_PLATFORM_CAPABILITY = [0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x47, 0x8B, 0xFD, 0xA0, 0x76, 0x88, 0x15, 0xB6, 0x65];
 
 // All USB devices we possibly know about, indexed by session ID
@@ -77,45 +78,67 @@ function internal_perform_control_transfer(
 }
 
 // Permission dialog
-let permission_request_id = 0;
-// Map a permission request ID to a _resolve_ promise
-let permission_requests = new Map();
-// Map a permission window ID to [a _resolve_ promise, permission request ID]
-let permission_windows = new Map();
-function request_user_permissions(possible_sids) {
-    let this_permission_request_id = permission_request_id++;
-    let resolve;
-    const promise = new Promise((res, _rej) => {
-        resolve = res;
-    });
-    permission_requests.set(this_permission_request_id, resolve);
+class UserPermissionDialog {
+    static #request_id = 0;
+    // Map a request ID to a _resolve_ promise
+    static #request_resolve = new Map();
+    // Map a permission window ID to [a _resolve_ promise, permission request ID]
+    // This is used to indicate user cancellation (by resolving with null)
+    static #windows = new Map();
 
-    let args = new URLSearchParams();
-    args.set("req", this_permission_request_id);
-    for (let sid of possible_sids)
-        args.append("sid", sid);
+    static {
+        browser.windows.onRemoved.addListener((window_id) => {
+            if (UserPermissionDialog.#windows.has(window_id)) {
+                let [resolve, permission_request_id] = UserPermissionDialog.#windows.get(window_id);
+                UserPermissionDialog.#windows.delete(window_id);
 
-    return browser.windows.create({
-        type: "panel",
-        url: `/permission-page/permission.html?${args.toString()}`,
-        width: 600,
-        height: 400,
-    }).then((window) => {
-        permission_windows.set(window.id, [resolve, this_permission_request_id]);
-        return promise;
-    });
-}
-browser.windows.onRemoved.addListener((window_id) => {
-    if (permission_windows.has(window_id)) {
-        let [resolve, permission_request_id] = permission_windows.get(window_id);
-        permission_windows.delete(window_id);
+                let request_was_outstanding = UserPermissionDialog.#request_resolve.delete(permission_request_id);
+                if (request_was_outstanding) {
+                    resolve(null);
+                }
+            }
+        });
 
-        let request_was_outstanding = permission_requests.delete(permission_request_id);
-        if (request_was_outstanding) {
-            resolve(null);
-        }
+        browser.runtime.onMessage.addListener((m, sender, response) => {
+            if (sender.id === EXTENSION_ID && sender.url.startsWith("moz-extension://")) {
+                if (sender.url.split('?', 1)[0].endsWith("/permission-page/permission.html")) {
+                    if (m.type === "finished") {
+                        let resolve = UserPermissionDialog.#request_resolve.get(m.req);
+                        UserPermissionDialog.#request_resolve.delete(m.req);
+                        resolve(m.result);
+                    } else if (m.type === "get_devices") {
+                        let devices = m.devices.map(sid => usb_devices.get(sid));
+                        response(devices);
+                    }
+                }
+            }
+        });
     }
-});
+
+    static request_user_permissions(possible_sids) {
+        let this_permission_request_id = UserPermissionDialog.#request_id++;
+        let resolve;
+        const promise = new Promise((res, _rej) => {
+            resolve = res;
+        });
+        UserPermissionDialog.#request_resolve.set(this_permission_request_id, resolve);
+
+        let args = new URLSearchParams();
+        args.set("req", this_permission_request_id);
+        for (let sid of possible_sids)
+            args.append("sid", sid);
+
+        return browser.windows.create({
+            type: "panel",
+            url: `/permission-page/permission.html?${args.toString()}`,
+            width: 600,
+            height: 400,
+        }).then((window) => {
+            UserPermissionDialog.#windows.set(window.id, [resolve, this_permission_request_id]);
+            return promise;
+        });
+    }
+}
 
 // Page state
 
@@ -219,24 +242,9 @@ function matches_device_filter(dev, filt) {
 }
 
 // Handle requests from pages
-browser.runtime.onMessage.addListener((m, sender, response) => {
-    // These are *internal* pages which have special permissions
-    if (sender.id === "awawausb@arcanenibble.com" && sender.url.startsWith("moz-extension://")) {
-        if (sender.url.split('?', 1)[0].endsWith("/permission-page/permission.html")) {
-            if (m.type === "finished") {
-                let resolve = permission_requests.get(m.req);
-                permission_requests.delete(m.req);
-                resolve(m.result);
-            } else if (m.type === "get_devices") {
-                let devices = m.devices.map(sid => usb_devices.get(sid));
-                response(devices);
-            }
-        }
-    }
-});
 browser.runtime.onConnect.addListener((p) => {
     // These are *internal* pages which have special permissions
-    if (p.sender.id === "awawausb@arcanenibble.com" && p.sender.url.startsWith("moz-extension://")) {
+    if (p.sender.id === EXTENSION_ID && p.sender.url.startsWith("moz-extension://")) {
         if (p.sender.url.endsWith("/debug-page/debug.html")) {
             p.onMessage.addListener((m) => {
                 if (m === "list_devices") {
@@ -321,7 +329,7 @@ browser.runtime.onConnect.addListener((p) => {
                 return;
             }
 
-            let selected_sid = await request_user_permissions(possible_devices);
+            let selected_sid = await UserPermissionDialog.request_user_permissions(possible_devices);
 
             // If there wasn't a selection made, or if it's invalid (unplugged?), bail out
             if (selected_sid === null) {
