@@ -291,6 +291,7 @@ class PerPageState {
         }
 
         // NOTE: We don't abort any transactions. We're not told to do that.
+        // Also, the stub will (should?) return them to us as failed.
     }
 
     static #next_page_id = 1;
@@ -407,19 +408,9 @@ browser.runtime.onConnect.addListener((p) => {
     // Create and stash the per-page state
     let [this_page_id, this_page] = PerPageState.new_page(p);
 
-    function get_usb_device(m, check_open=false) {
+    function get_usb_device(m, check_open=false, check_config=true) {
         let page_usb_dev = this_page.opened_devices.get(m.dev_handle);
         if (page_usb_dev === undefined) {
-            p.postMessage({
-                txn_id: m.txn_id,
-                success: false,
-                error: "not_found",
-            });
-            return;
-        }
-
-        let global_usb_dev = usb_devices.get(page_usb_dev.sid);
-        if (global_usb_dev === undefined) {
             p.postMessage({
                 txn_id: m.txn_id,
                 success: false,
@@ -437,17 +428,19 @@ browser.runtime.onConnect.addListener((p) => {
                 });
                 return;
             }
-            if (global_usb_dev.current_config == 0) {
-                p.postMessage({
-                    txn_id: m.txn_id,
-                    success: false,
-                    error: "not_configured",
-                });
-                return;
+            if (check_config) {
+                if (page_usb_dev.global_usb_dev.current_config == 0) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: false,
+                        error: "not_configured",
+                    });
+                    return;
+                }
             }
         }
 
-        return [page_usb_dev, global_usb_dev];
+        return page_usb_dev;
     }
 
     function map_native_error(txn_id, m) {
@@ -548,9 +541,8 @@ browser.runtime.onConnect.addListener((p) => {
                 dev_data: page_usb_dev.clean_up_usb_device_for_page,
             });
         } else if (m.type === "open") {
-            let usb_devs = get_usb_device(m);
-            if (usb_devs === undefined) return;
-            let [page_usb_dev, global_usb_dev] = usb_devs;
+            let page_usb_dev = get_usb_device(m);
+            if (page_usb_dev === undefined) return;
 
             // Already open _locally_?
             if (page_usb_dev.opened) {
@@ -562,8 +554,8 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // Already open globally, but *not* locally?
-            if (global_usb_dev.opened > 0) {
-                global_usb_dev.opened++;
+            if (page_usb_dev.global_usb_dev.opened > 0) {
+                page_usb_dev.global_usb_dev.opened++;
                 page_usb_dev.opened = true;
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -579,7 +571,7 @@ browser.runtime.onConnect.addListener((p) => {
                 if (!map_native_error(m.txn_id, res)) {
                     // The open was (finally) successful
                     // NOTE: We *can* race and send redundant opens to the stub
-                    global_usb_dev.opened++;
+                    page_usb_dev.global_usb_dev.opened++;
                     page_usb_dev.opened = true;
                     console.log("open success!");
                     p.postMessage({
@@ -594,9 +586,8 @@ browser.runtime.onConnect.addListener((p) => {
                 txn_id: global_txn_id,
             });
         } else if (m.type === "close") {
-            let usb_devs = get_usb_device(m);
-            if (usb_devs === undefined) return;
-            let [page_usb_dev, global_usb_dev] = usb_devs;
+            let page_usb_dev = get_usb_device(m);
+            if (page_usb_dev === undefined) return;
 
             // Already closed _locally_?
             if (!page_usb_dev.opened) {
@@ -617,9 +608,8 @@ browser.runtime.onConnect.addListener((p) => {
                 success: true,
             });
         } else if (m.type === "ctrl_xfer") {
-            let usb_devs = get_usb_device(m, true);
-            if (usb_devs === undefined) return;
-            let [page_usb_dev, global_usb_dev] = usb_devs;
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
 
             let req = 0;
 
