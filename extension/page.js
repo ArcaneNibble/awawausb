@@ -256,13 +256,6 @@
             }
             super();
         }
-        async test(x) {
-            console.log("test?");
-            console.log(await __awawausb_send_request({
-                type: "test_open_sid",
-                sid: x,
-            }));
-        }
 
         // Actual functionality
         async requestDevice(options) {
@@ -308,6 +301,13 @@
                 // Whatever the failure reason may be, we report it as "not found"
                 throw new DOMException("No USB device found or selected", "NotFoundError");
             }
+        }
+
+        async getDevices() {
+            // NOTE: We don't actually actively re-enumerate anything
+            // It's fine to just return all cached devices.
+            // TODO: This will eventually require invalidating unplugged devices.
+            return Array.from(dev_handle_to_obj_map.values());
         }
 
         // Event dispatching
