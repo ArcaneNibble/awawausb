@@ -24,15 +24,6 @@ const WEBUSB_PLATFORM_CAPABILITY = [0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x
 // XXX this structure is rather ad-hoc, because it contains a lot of Chapter-9 fields
 let usb_devices = new Map();
 
-function clean_up_usb_device_for_page(dev) {
-    let ret = structuredClone(dev);
-
-    delete ret.webusb_landing_page;
-    delete ret.opened;
-
-    return ret;
-}
-
 // All outstanding transactions, indexed by transaction ID,
 // which is a string of the form `pageID-txnID`
 // (page ID of 0 is reserved for special global control transfers)
@@ -154,39 +145,15 @@ class UserPermissionDialog {
 
 // Page state
 
-// This helper function is used to abort all transactions,
-// which we need to do on page close as well as on explicit close
-function close_page_device(global_txn_id, page_usb_dev, global_usb_dev) {
-    console.log("actual close");
-    page_usb_dev.abort_transactions(-2);
-
-    page_usb_dev.opened = false;
-    global_usb_dev.opened--;
-    if (global_usb_dev.opened === 0) {
-        console.log("close global");
-        // We actually have to send a request to the stub now
-        // This is not queued on the per-page device, and it cannot be aborted
-        usb_txns.set(global_txn_id, new PageTransaction((res) => {
-            // No errors are reported if closing fails
-            if (res.type === "RequestError") {
-                console.warn("Close operation failed!", res);
-            }
-        }));
-        nativeport.postMessage({
-            type: "CloseDevice",
-            sid: page_usb_dev.sid,
-            txn_id: global_txn_id,
-        });
-    }
-}
-
 // What we need to know (here, globally) about USBDevice objects in pages
 class PerPageUSBDevice {
     page;
     sid;
-    constructor(page, sid) {
+    global_usb_dev;
+    constructor(page, sid, global_usb_dev) {
         this.page = page;
         this.sid = sid;
+        this.global_usb_dev = global_usb_dev;
     }
 
     // The following state is tracked twice: here, and in the page.
@@ -231,6 +198,41 @@ class PerPageUSBDevice {
             }
         }
     }
+
+    // Close this device, using the specified transaction ID to talk to the native stub.
+    // We need to do this on page close as well as on explicit close
+    close(global_txn_id) {
+        console.log("actual close");
+        this.abort_transactions(-2);
+
+        this.opened = false;
+        this.global_usb_dev.opened--;
+        if (this.global_usb_dev.opened === 0) {
+            console.log("close global");
+            // We actually have to send a request to the stub now
+            // This is not queued on the per-page device, and it cannot be aborted
+            usb_txns.set(global_txn_id, new PageTransaction((res) => {
+                // No errors are reported if closing fails
+                if (res.type === "RequestError") {
+                    console.warn("Close operation failed!", res);
+                }
+            }));
+            nativeport.postMessage({
+                type: "CloseDevice",
+                sid: this.sid,
+                txn_id: global_txn_id,
+            });
+        }
+    }
+
+    get clean_up_usb_device_for_page() {
+        let ret = structuredClone(this.global_usb_dev);
+
+        delete ret.webusb_landing_page;
+        delete ret.opened;
+
+        return ret;
+    }
 }
 
 // Actual per-page state. Pages are referenced by a numeric ID,
@@ -252,13 +254,18 @@ class PerPageState {
     open_device(sid) {
         let existing_handle = this.sid_to_handle.get(sid);
         if (existing_handle !== undefined)
-            return existing_handle;
+            return [existing_handle, this.opened_devices.get(existing_handle)];
 
-        let device_state = new PerPageUSBDevice(this, sid);
+        let global_usb_dev = usb_devices.get(sid);
+        if (global_usb_dev === undefined) {
+            return [undefined, undefined];
+        }
+
+        let page_usb_dev = new PerPageUSBDevice(this, sid, global_usb_dev);
         let this_device_handle = this.#next_device_id++;
-        this.opened_devices.set(this_device_handle, device_state);
+        this.opened_devices.set(this_device_handle, page_usb_dev);
         this.sid_to_handle.set(sid, this_device_handle);
-        return this_device_handle;
+        return [this_device_handle, page_usb_dev];
     }
 
     static #next_page_id = 1;
@@ -284,7 +291,7 @@ class PerPageState {
             if (page_usb_dev.opened) {
                 let this_txn_id = usb_global_txn++;
                 let txn_id = `0-${this_txn_id}`;
-                close_page_device(txn_id, page_usb_dev, global_usb_dev);
+                page_usb_dev.close(txn_id);
             }
         }
 
@@ -497,8 +504,8 @@ browser.runtime.onConnect.addListener((p) => {
                 });
                 return;
             }
-            let dev_data = usb_devices.get(selected_sid);
-            if (dev_data === undefined) {
+            let [dev_handle, page_usb_dev] = this_page.open_device(selected_sid);
+            if (dev_handle === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
                     success: false,
@@ -507,13 +514,11 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // Otherwise, we should be good to go!
-            dev_data = clean_up_usb_device_for_page(dev_data);
-            let dev_handle = this_page.open_device(selected_sid);
             p.postMessage({
                 txn_id: m.txn_id,
                 success: true,
                 dev_handle,
-                dev_data,
+                dev_data: page_usb_dev.clean_up_usb_device_for_page,
             });
         } else if (m.type === "open") {
             let usb_devs = get_usb_device(m);
@@ -577,7 +582,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Do the actual close operation, including aborting transactions
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
-            close_page_device(global_txn_id, page_usb_dev, global_usb_dev);
+            page_usb_dev.close(global_txn_id);
 
             // No errors are reported if closing fails
             p.postMessage({
