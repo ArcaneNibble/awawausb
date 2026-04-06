@@ -89,11 +89,20 @@ class PerPageState {
 
     // Map from device handle (numeric ID) to authoritative state
     opened_devices = new Map();
+    // "Reverse" map from session ID to device handle
+    // This is used to make sure we don't open duplicate devices
+    // TODO: How does this get invalidated?
+    sid_to_handle = new Map();
     #next_device_id = 0;
     open_device(sid) {
+        let existing_handle = this.sid_to_handle.get(sid);
+        if (existing_handle !== undefined)
+            return existing_handle;
+
         let device_state = new PerPageUSBDevice(sid);
         let this_device_handle = this.#next_device_id++;
         this.opened_devices.set(this_device_handle, device_state);
+        this.sid_to_handle.set(sid, this_device_handle);
         return this_device_handle;
     }
 
@@ -129,6 +138,38 @@ class PerPageState {
         return ret;
     }
 }
+
+function matches_iface_filter(iface, filt) {
+    // > A USB interface interface matches an interface filter filter if the following steps return match
+    if (filt.classCode !== null && iface.bInterfaceClass !== filt.classCode) return false;
+    if (filt.subclassCode !== null && iface.bInterfaceSubClass !== filt.subclassCode) return false;
+    if (filt.protocolCode !== null && iface.bInterfaceProtocol !== filt.protocolCode) return false;
+    return true;
+}
+
+function matches_device_filter(dev, filt) {
+    // > A USB device device matches a device filter filter if the following steps return match
+    if (filt.vendorId !== null && dev.idVendor !== filt.vendorId) return false;
+    if (filt.productId !== null && dev.idProduct !== filt.productId) return false;
+    if (filt.serialNumber !== null && dev.serial !== filt.serialNumber) return false;
+    if (filt.classCode !== null) {
+        for (let cfg of dev.configs) {
+            for (let iface of cfg.interfaces) {
+                for (let iface_alt of iface.alts) {
+                    if (matches_iface_filter(iface_alt, filt))
+                        return true;
+                }
+            }
+        }
+        // TODO: interface filter
+    }
+    if (filt.classCode !== null && dev.bDeviceClass !== filt.classCode) return false;
+    if (filt.subclassCode !== null && dev.bDeviceSubClass !== filt.subclassCode) return false;
+    if (filt.protocolCode !== null && dev.bDeviceProtocol !== filt.protocolCode) return false;
+    return true;
+}
+
+// Handle requests from pages
 browser.runtime.onConnect.addListener((p) => {
     // These are *internal* pages which have special permissions
     if (p.sender.id === "awawausb@arcanenibble.com" && p.sender.url.startsWith("moz-extension://")) {
@@ -175,9 +216,51 @@ browser.runtime.onConnect.addListener((p) => {
                 success: true,
                 msg: m.msg,
             });
-        } else if (m.type === "test_open_sid") {
-            let dev_handle = this_page.open_device(m.sid);
-            console.log(dev_handle);
+        } else if (m.type === "request_device") {
+            let filters = m.filters;
+            let exclusionFilters = m.exclusionFilters;
+
+            let possible_devices = new Array();
+            for (let [sid, usb_dev] of usb_devices) {
+                let matches_a_filter = false;
+                for (let filt of filters) {
+                    if (matches_device_filter(usb_dev, filt)) {
+                        matches_a_filter = true;
+                        break;
+                    }
+                }
+                // XXX if there are no filters, accept the device
+                // This appears to be contrary to the pedantic wording of the spec,
+                // but it's what Chrome does and it logically makes sense
+                if (!matches_a_filter && filters.length > 0)
+                    continue;
+
+                let matches_an_exclusion = false;
+                for (let filt of exclusionFilters) {
+                    if (matches_device_filter(usb_dev, filt)) {
+                        matches_an_exclusion = true;
+                        break;
+                    }
+                }
+                if (matches_an_exclusion)
+                    continue;
+
+                possible_devices.push(sid);
+            }
+
+            // If there's no devices, don't even bother to pop up a dialog, just fail
+            if (possible_devices.length === 0) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            }
+
+            // TODO: Implement permission dialog
+            let selected_sid = possible_devices[0];
+
+            let dev_handle = this_page.open_device(selected_sid);
             p.postMessage({
                 txn_id: m.txn_id,
                 success: true,

@@ -7,6 +7,8 @@
 // all data as suspect within the *background* script.
 
 (function() {
+    const DEBUG_DISABLE_TRANSIENT_ACTIVATION = true;
+
     // Get, and then immediately hide, our interface methods with the content script
     const __awawausb_send_request = window.__awawausb_send_request;
     delete window.__awawausb_send_request;
@@ -136,6 +138,10 @@
 
     // Classes for the USB devices
     const DEV_DEVID = Symbol("USBDevice.device_id");
+    // Map from numeric device handles to objects
+    // (needed to maintain object equality when opening
+    //  the same device over and over again)
+    let dev_handle_to_obj_map = new Map();
     window.USBDevice = class {
         #device_id
         constructor(devid) {
@@ -217,6 +223,31 @@
         }
     };
 
+    function handle_null_undef(x) {
+        if (x === null || x === undefined)
+            return null;
+        return x;
+    }
+    function validate_filter(filt_in) {
+        let filt_out = {
+            vendorId: handle_null_undef(filt_in.vendorId),
+            productId: handle_null_undef(filt_in.productId),
+            classCode: handle_null_undef(filt_in.classCode),
+            subclassCode: handle_null_undef(filt_in.subclassCode),
+            protocolCode: handle_null_undef(filt_in.protocolCode),
+            serialNumber: handle_null_undef(filt_in.serialNumber),
+        };
+
+        // > A USBDeviceFilter filter is valid if the following steps return valid
+        if (filt_out.productId !== null && filt_out.vendorId === null)
+            throw new TypeError("Invalid USBDeviceFilter");
+        if (filt_out.subclassCode !== null && filt_out.classCode === null)
+            throw new TypeError("Invalid USBDeviceFilter");
+        if (filt_out.protocolCode !== null && filt_out.subclassCode === null)
+            throw new TypeError("Invalid USBDeviceFilter");
+        return filt_out;
+    }
+
     let allow_usb_to_construct = true;
     window.USB = class extends EventTarget {
         constructor() {
@@ -232,11 +263,51 @@
                 sid: x,
             }));
         }
-        test2() {
-            let devid = {};
-            devid[DEV_DEVID] = 12345;
-            let dev = new USBDevice(devid);
-            return dev;
+
+        // Actual functionality
+        async requestDevice(options) {
+            // Validate args
+            let filters = options.filters;
+            if (filters === undefined) {
+                throw new TypeError("missing `filters` in USBDeviceRequestOptions");
+            }
+            let exclusionFilters = options.exclusionFilters;
+            if (exclusionFilters === undefined) {
+                exclusionFilters = [];
+            }
+
+            filters = Array.from(filters, x => validate_filter(x));
+            exclusionFilters = Array.from(exclusionFilters, x => validate_filter(x));
+
+            if (!DEBUG_DISABLE_TRANSIENT_ACTIVATION) {
+                // Check for transient activation
+                // This is (somewhat) of a security feature,
+                // but not one worth being extremely paranoid over.
+                if (!navigator.userActivation.isActive) {
+                    throw new DOMException("requestDevice() requires transient activation!", "SecurityError");
+                }
+            }
+
+            try {
+                let resp = await __awawausb_send_request({
+                    type: "request_device",
+                    filters,
+                    exclusionFilters,
+                });
+
+                let existing_device = dev_handle_to_obj_map.get(resp.dev_handle);
+                if (existing_device !== undefined)
+                    return existing_device;
+
+                let dev_handle = {};
+                dev_handle[DEV_DEVID] = resp.dev_handle;
+                let usb_device = new USBDevice(dev_handle);
+                dev_handle_to_obj_map.set(resp.dev_handle, usb_device);
+                return usb_device;
+            } catch (e) {
+                // Whatever the failure reason may be, we report it as "not found"
+                throw new DOMException("No USB device found or selected", "NotFoundError");
+            }
         }
 
         // Event dispatching
