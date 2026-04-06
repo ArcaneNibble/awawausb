@@ -9,13 +9,46 @@
 (function() {
     const DEBUG_DISABLE_TRANSIENT_ACTIVATION = true;
 
+    // "Global" objects and event handling
+    let the_usb_obj;
+    window.USBConnectionEvent = class extends Event {
+        #device
+        constructor(type, eventInitDict) {
+            super(type, eventInitDict);
+            let device = eventInitDict.device;
+            if (device === undefined) {
+                throw new TypeError("missing `device` in USBConnectionEventInit");
+            }
+            if (!(device instanceof USBDevice)) {
+                throw new TypeError("expected a USBDevice");
+            }
+            this.#device = device;
+        }
+        get device() {
+            return this.#device;
+        }
+    };
+
     // Get, and then immediately hide, our interface methods with the content script
     const __awawausb_send_request = window.__awawausb_send_request;
     delete window.__awawausb_send_request;
 
+    // Map from numeric device handles to objects
+    // (needed to maintain object equality when opening
+    //  the same device over and over again)
+    let dev_handle_to_obj_map = new Map();
+
     // Set up our local event dispatcher, and then hide the method
     function notification_handler(m) {
-        console.log("notif!", m);
+        if (m.event === "unplug") {
+            let dev = dev_handle_to_obj_map.get(m.dev_handle);
+            if (dev !== undefined) {
+                dev_handle_to_obj_map.delete(m.dev_handle);
+                the_usb_obj.dispatchEvent(new USBConnectionEvent('disconnect', {device: dev}));
+            }
+        } else {
+            console.warn("Unknown WebUSB notification", m);
+        }
     }
     window.__awawausb_set_event_cb(notification_handler);
     delete window.__awawausb_set_event_cb;
@@ -181,10 +214,6 @@
     // Classes for the USB devices
     const DEV_HANDLE = Symbol("USBDevice.device_handle");
     const DEV_DESC = Symbol("USBDevice.descriptors");
-    // Map from numeric device handles to objects
-    // (needed to maintain object equality when opening
-    //  the same device over and over again)
-    let dev_handle_to_obj_map = new Map();
     window.USBDevice = class {
         #device_handle;
         [DEV_DESC];
@@ -547,25 +576,6 @@
         }
     };
 
-    // "Global" objects and event handling
-    window.USBConnectionEvent = class extends Event {
-        #device
-        constructor(type, eventInitDict) {
-            super(type, eventInitDict);
-            let device = eventInitDict.device;
-            if (device === undefined) {
-                throw new TypeError("missing `device` in USBConnectionEventInit");
-            }
-            if (!(device instanceof USBDevice)) {
-                throw new TypeError("expected a USBDevice");
-            }
-            this.#device = device;
-        }
-        get device() {
-            return this.#device;
-        }
-    };
-
     function handle_null_undef(x) {
         if (x === null || x === undefined)
             return null;
@@ -688,6 +698,7 @@
             this.#ondisconnect_set = true;
         }
     };
-    navigator.usb = new USB();
+    the_usb_obj = new USB();
+    navigator.usb = the_usb_obj;
     allow_usb_to_construct = false;
 })();

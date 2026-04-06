@@ -32,7 +32,7 @@ let txn_map = new Map();
 port.onMessage.addListener((m) => {
     if (m.event !== undefined) {
         if (page_event_cb !== undefined) {
-            page_event_cb(m);
+            page_event_cb(cloneInto(m, window));
         }
         return;
     }

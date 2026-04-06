@@ -255,11 +255,10 @@ class PerPageState {
     opened_devices = new Map();
     // "Reverse" map from session ID to device handle
     // This is used to make sure we don't open duplicate devices
-    // TODO: How does this get invalidated?
-    sid_to_handle = new Map();
+    #sid_to_handle = new Map();
     #next_device_id = 0;
     open_device(sid) {
-        let existing_handle = this.sid_to_handle.get(sid);
+        let existing_handle = this.#sid_to_handle.get(sid);
         if (existing_handle !== undefined)
             return [existing_handle, this.opened_devices.get(existing_handle)];
 
@@ -271,9 +270,27 @@ class PerPageState {
         let this_device_handle = this.#next_device_id++;
         let page_usb_dev = new PerPageUSBDevice(this_device_handle, this, sid, global_usb_dev);
         this.opened_devices.set(this_device_handle, page_usb_dev);
-        this.sid_to_handle.set(sid, this_device_handle);
+        this.#sid_to_handle.set(sid, this_device_handle);
         global_usb_dev.page_devices.add(page_usb_dev);
         return [this_device_handle, page_usb_dev];
+    }
+
+    // Force-invalidate a page's device, probably because it was unplugged
+    invalidate_device(page_usb_dev) {
+        this.#sid_to_handle.delete(page_usb_dev.sid);
+        this.opened_devices.delete(page_usb_dev.dev_handle);
+        page_usb_dev.global_usb_dev.page_devices.delete(page_usb_dev);
+
+        try {
+            this.port.postMessage({
+                event: "unplug",
+                dev_handle: page_usb_dev.dev_handle,
+            });
+        } catch (e) {
+            // Ignore notification failures
+        }
+
+        // NOTE: We don't abort any transactions. We're not told to do that.
     }
 
     static #next_page_id = 1;
@@ -928,13 +945,8 @@ nativeport.onMessage.addListener(async (m) => {
             return;
         }
 
-        // TODO: Probably abort all outstanding transactions?
         for (let page_dev of device.page_devices) {
-            console.log("poking page", page_dev);
-            page_dev.page.port.postMessage({
-                event: "unplug",
-                sid,
-            });
+            page_dev.page.invalidate_device(page_dev);
         }
 
         usb_devices.delete(sid);
