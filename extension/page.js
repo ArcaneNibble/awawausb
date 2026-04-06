@@ -289,6 +289,13 @@
             }
         }
 
+        async forget() {
+            await __awawausb_send_request({
+                type: "forget",
+                dev_handle: this.#device_handle,
+            });
+        }
+
         async controlTransferIn(setup, length) {
             setup = check_control_xfer_params(setup);
             try {

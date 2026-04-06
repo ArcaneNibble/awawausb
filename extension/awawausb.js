@@ -252,10 +252,10 @@ class PerPageState {
 
     // Permission storage
     // {vid, pid, sn} => {dev_handles...}
-    allowed_devices = new Map();
+    #allowed_devices = new Map();
     find_allowed_device_slot(global_usb_dev, make_hole=true) {
         let found;
-        for (let [ids, handles] of this.allowed_devices) {
+        for (let [ids, handles] of this.#allowed_devices) {
             if (ids.vid === global_usb_dev.idVendor
                 && ids.pid === global_usb_dev.idProduct
                 && ids.sn === global_usb_dev.serial)
@@ -272,11 +272,16 @@ class PerPageState {
                 sn: global_usb_dev.serial,
             };
             let handles = new Set();
-            this.allowed_devices.set(ids, handles);
+            this.#allowed_devices.set(ids, handles);
             found = [ids, handles];
         }
 
         return found;
+    }
+    forget_device(dev_handle) {
+        for (let handles of this.#allowed_devices.values()) {
+            handles.delete(dev_handle);
+        }
     }
 
     // Map from device handle (numeric ID) to authoritative state
@@ -316,19 +321,32 @@ class PerPageState {
 
         // Remove this device from the permission storage,
         // and also remove the key entirely if there's no SN and no device
-        let [allowed_ids, allowed_handles] = this.find_allowed_device_slot(page_usb_dev.global_usb_dev);
-        allowed_handles.delete(page_usb_dev.dev_handle);
-        if (allowed_ids.sn === null && allowed_handles.size === 0) {
-            this.allowed_devices.delete(allowed_ids);
-        }
+        let allowed_slot = this.find_allowed_device_slot(page_usb_dev.global_usb_dev, false);
+        if (allowed_slot !== undefined) {
+            let [allowed_ids, allowed_handles] = allowed_slot;
+            // We *only* want to wipe out the allowed permissions if
+            // the client *hasn't* already called forget()
+            // This is the only way to hang on to devices with no SN,
+            // and this is what the spec says:
+            // > Search for an element allowedDevice in storage.allowedDevices
+            // > where device is in allowedDevice@[[devices]],
+            // > if no such element exists, abort these steps.
+            if (allowed_handles.has(page_usb_dev.dev_handle)) {
+                allowed_handles.delete(page_usb_dev.dev_handle);
+                if (allowed_ids.sn === null && allowed_handles.size === 0) {
+                    this.#allowed_devices.delete(allowed_ids);
+                }
 
-        try {
-            this.port.postMessage({
-                event: "unplug",
-                dev_handle: page_usb_dev.dev_handle,
-            });
-        } catch (e) {
-            // Ignore notification failures
+                // Apparently we don't get disconnect notifications on forgotten devices
+                try {
+                    this.port.postMessage({
+                        event: "unplug",
+                        dev_handle: page_usb_dev.dev_handle,
+                    });
+                } catch (e) {
+                    // Ignore notification failures
+                }
+            }
         }
 
         // NOTE: We don't abort any transactions. We're not told to do that.
@@ -406,7 +424,7 @@ class PerPageState {
             ret.push({
                 page_id,
                 url: state.port.sender.url,
-                allowed_devices: state.allowed_devices,
+                allowed_devices: state.#allowed_devices,
                 handles,
             });
         }
@@ -672,6 +690,12 @@ browser.runtime.onConnect.addListener((p) => {
             page_usb_dev.close(global_txn_id);
 
             // No errors are reported if closing fails
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: true,
+            });
+        } else if (m.type === "forget") {
+            this_page.forget_device(m.dev_handle);
             p.postMessage({
                 txn_id: m.txn_id,
                 success: true,
