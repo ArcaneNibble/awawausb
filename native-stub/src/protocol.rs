@@ -21,6 +21,8 @@ pub enum Errors {
     Stall,
     /// Some kind of error occurred, but we are not required to be any more specific
     TransferError,
+    /// Attempted to do something while the device is not properly opened or claimed
+    InvalidState,
 }
 
 #[allow(non_snake_case)]
@@ -110,6 +112,10 @@ pub enum RequestMessage {
         _timeout_internal: Option<u64>,
     },
     OpenDevice {
+        sid: String,
+        txn_id: String,
+    },
+    CloseDevice {
         sid: String,
         txn_id: String,
     },

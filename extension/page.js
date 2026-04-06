@@ -207,6 +207,20 @@
             }
         }
 
+        async close() {
+            try {
+                await __awawausb_send_request({
+                    type: "close",
+                    dev_handle: this.#device_handle,
+                });
+
+                // Successful close?
+                this.#opened = false;
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+
         get usbVersionMajor() {
             return (this[DEV_DESC].bcdUSB >> 8) & 0xff;
         }

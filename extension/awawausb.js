@@ -464,6 +464,47 @@ browser.runtime.onConnect.addListener((p) => {
                 sid: page_usb_dev.sid,
                 txn_id: global_txn_id,
             });
+        } else if (m.type === "close") {
+            console.log("close attempt!");
+
+            let usb_devs = get_usb_device(m);
+            if (usb_devs === undefined) return;
+            let [page_usb_dev, global_usb_dev] = usb_devs;
+
+            // Already closed _locally_?
+            if (!page_usb_dev.opened) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: true,
+                });
+                return;
+            }
+
+            // TODO: Abort all transactions
+            console.log("actual close");
+
+            page_usb_dev.opened = false;
+            global_usb_dev.opened--;
+            if (global_usb_dev.opened === 0) {
+                console.log("close global");
+                // We actually have to send a request to the stub now
+                let global_txn_id = `${this_page_id}-${m.txn_id}`;
+                usb_txns.set(global_txn_id, new PageTransaction((res) => {
+                    console.log("native cb close", res);
+                    // No errors are reported if closing fails
+                }));
+                nativeport.postMessage({
+                    type: "CloseDevice",
+                    sid: page_usb_dev.sid,
+                    txn_id: global_txn_id,
+                });
+            }
+
+            // No errors are reported if closing fails
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: true,
+            });
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);
             p.postMessage({
@@ -471,25 +512,6 @@ browser.runtime.onConnect.addListener((p) => {
                 success: false,
             });
         }
-
-        // // Test
-        // let this_txn_id = port_txn_id++;
-        // let txn_id = `${this_port_id}-${this_txn_id}`;
-        // // TODO: Do we need this? Can we get rid of this?
-        // usb_txns.set(txn_id, true);
-
-        // let obj = {
-        //     _timeout_internal: 0,
-        //     type: "ControlTransfer",
-        //     sid: m,
-        //     txn_id,
-        //     request_type: 0xc0,
-        //     request: 'e'.charCodeAt(0),
-        //     value: 0,
-        //     index: 0,
-        //     length: 4,
-        // }
-        // nativeport.postMessage(obj);
     });
 });
 
