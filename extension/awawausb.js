@@ -577,6 +577,7 @@ nativeport.onMessage.addListener(async (m) => {
                     ret += "http://";
                 else if (url_desc.data[2] == 1)
                     ret += "https://";
+                else if (url_desc.data[2] == 0xff) {}
                 else {
                     console.log("WebUSB descriptor unknown scheme!", url_desc.data[2]);
                     return;
