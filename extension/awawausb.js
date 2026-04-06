@@ -76,6 +76,45 @@ function internal_perform_control_transfer(
     return promise;
 }
 
+// Permission dialog
+let permission_request_id = 0;
+// Map a permission request ID to a _resolve_ promise
+let permission_requests = new Map();
+// Map a permission window ID to [a _resolve_ promise, permission request ID]
+let permission_windows = new Map();
+function request_user_permissions(possible_sids) {
+    let this_permission_request_id = permission_request_id++;
+    let resolve;
+    const promise = new Promise((res, _rej) => {
+        resolve = res;
+    });
+    permission_requests.set(this_permission_request_id, resolve);
+
+    let args = new URLSearchParams();
+    args.set("req", this_permission_request_id);
+    for (let sid of possible_sids)
+        args.append("sid", sid);
+
+    return browser.windows.create({
+        type: "panel",
+        url: `/permission-page/permission.html?${args.toString()}`
+    }).then((window) => {
+        permission_windows.set(window.id, [resolve, this_permission_request_id]);
+        return promise;
+    });
+}
+browser.windows.onRemoved.addListener((window_id) => {
+    if (permission_windows.has(window_id)) {
+        let [resolve, permission_request_id] = permission_windows.get(window_id);
+        permission_windows.delete(window_id);
+
+        let request_was_outstanding = permission_requests.delete(permission_request_id);
+        if (request_was_outstanding) {
+            resolve(null);
+        }
+    }
+});
+
 // Page state
 
 // What we need to know (here, globally) about USBDevice objects in pages
@@ -178,6 +217,21 @@ function matches_device_filter(dev, filt) {
 }
 
 // Handle requests from pages
+browser.runtime.onMessage.addListener((m, sender, response) => {
+    // These are *internal* pages which have special permissions
+    if (sender.id === "awawausb@arcanenibble.com" && sender.url.startsWith("moz-extension://")) {
+        if (sender.url.split('?', 1)[0].endsWith("/permission-page/permission.html")) {
+            if (m.type === "finished") {
+                let resolve = permission_requests.get(m.req);
+                permission_requests.delete(m.req);
+                resolve(m.result);
+            } else if (m.type === "get_devices") {
+                let devices = m.devices.map(sid => usb_devices.get(sid));
+                response(devices);
+            }
+        }
+    }
+});
 browser.runtime.onConnect.addListener((p) => {
     // These are *internal* pages which have special permissions
     if (p.sender.id === "awawausb@arcanenibble.com" && p.sender.url.startsWith("moz-extension://")) {
@@ -217,7 +271,7 @@ browser.runtime.onConnect.addListener((p) => {
         PerPageState.delete_page(this_page_id);
     });
 
-    p.onMessage.addListener((m) => {
+    p.onMessage.addListener(async (m) => {
         if (m.type === "echo") {
             p.postMessage({
                 txn_id: m.txn_id,
@@ -266,6 +320,8 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // TODO: Implement permission dialog
+            let permission_xxx = await request_user_permissions(possible_devices);
+            console.log(permission_xxx);
             let selected_sid = possible_devices[0];
 
             let dev_data = clean_up_usb_device_for_page(usb_devices.get(selected_sid));
@@ -283,12 +339,6 @@ browser.runtime.onConnect.addListener((p) => {
                 success: false,
             });
         }
-        // console.log("test from bkg", m);
-        // // p.postMessage(m * 2);
-        // // browser.windows.create({
-        // //     type: "panel",
-        // //     url: `/permission-page/permission.html?test=${m}`
-        // // });
 
         // // Test
         // let this_txn_id = port_txn_id++;
