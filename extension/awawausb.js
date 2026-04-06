@@ -97,7 +97,9 @@ function request_user_permissions(possible_sids) {
 
     return browser.windows.create({
         type: "panel",
-        url: `/permission-page/permission.html?${args.toString()}`
+        url: `/permission-page/permission.html?${args.toString()}`,
+        width: 600,
+        height: 400,
     }).then((window) => {
         permission_windows.set(window.id, [resolve, this_permission_request_id]);
         return promise;
@@ -319,12 +321,27 @@ browser.runtime.onConnect.addListener((p) => {
                 return;
             }
 
-            // TODO: Implement permission dialog
-            let permission_xxx = await request_user_permissions(possible_devices);
-            console.log(permission_xxx);
-            let selected_sid = possible_devices[0];
+            let selected_sid = await request_user_permissions(possible_devices);
 
-            let dev_data = clean_up_usb_device_for_page(usb_devices.get(selected_sid));
+            // If there wasn't a selection made, or if it's invalid (unplugged?), bail out
+            if (selected_sid === null) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            }
+            let dev_data = usb_devices.get(selected_sid);
+            if (dev_data === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                });
+                return;
+            }
+
+            // Otherwise, we should be good to go!
+            dev_data = clean_up_usb_device_for_page(dev_data);
             let dev_handle = this_page.open_device(selected_sid);
             p.postMessage({
                 txn_id: m.txn_id,
