@@ -4,25 +4,16 @@ let list_devices_ul = document.getElementById("list_of_devices");
 let list_pages_ol = document.getElementById("list_of_pages");
 let list_txns_ol = document.getElementById("list_of_txns");
 
-function make_row(desc, val) {
+function make_row(...items) {
     let tr = document.createElement('tr');
-    let td1 = document.createElement('td');
-    td1.innerText = desc;
-    tr.appendChild(td1);
-    let td2 = document.createElement('td');
-    td2.innerText = val;
-    tr.appendChild(td2);
-    return tr;
-}
-
-function make_row_elem(desc, elem) {
-    let tr = document.createElement('tr');
-    let td1 = document.createElement('td');
-    td1.innerText = desc;
-    tr.appendChild(td1);
-    let td2 = document.createElement('td');
-    td2.appendChild(elem);
-    tr.appendChild(td2);
+    for (let item of items) {
+        let td = document.createElement('td');
+        if (item instanceof HTMLElement)
+            td.appendChild(item);
+        else
+            td.innerText = item
+        tr.appendChild(td);
+    }
     return tr;
 }
 
@@ -40,7 +31,7 @@ function do_iface_alt_setting(iface, elem) {
     elem.appendChild(make_row("bInterfaceProtocol", `0x${to_hex(iface.bInterfaceProtocol, 2)}`));
 
     let eps_ul = document.createElement('ul');
-    elem.appendChild(make_row_elem("Endpoints", eps_ul));
+    elem.appendChild(make_row("Endpoints", eps_ul));
     for (let ep of iface.endpoints) {
         let ep_li = document.createElement('li');
         eps_ul.appendChild(ep_li);
@@ -76,7 +67,7 @@ port.onMessage.addListener((m) => {
                 let link = document.createElement('a');
                 link.href = dev_info.webusb_landing_page;
                 link.innerText = dev_info.webusb_landing_page;
-                tbody.appendChild(make_row_elem("WebUSB landing page", link));
+                tbody.appendChild(make_row("WebUSB landing page", link));
             }
             tbody.appendChild(make_row("Vendor ID", `0x${to_hex(dev_info.idVendor, 4)}`));
             tbody.appendChild(make_row("Product ID", `0x${to_hex(dev_info.idProduct, 4)}`));
@@ -92,7 +83,7 @@ port.onMessage.addListener((m) => {
 
 
             let all_configs_ul = document.createElement('ul');
-            tbody.appendChild(make_row_elem("All configurations", all_configs_ul));
+            tbody.appendChild(make_row("All configurations", all_configs_ul));
             for (let conf of dev_info.configs) {
                 let configs_li = document.createElement('li');
                 all_configs_ul.appendChild(configs_li);
@@ -111,7 +102,7 @@ port.onMessage.addListener((m) => {
                 configs_tbody.appendChild(make_row("Config name", conf.config_name));
 
                 let all_ifaces_ul = document.createElement('ul');
-                configs_tbody.appendChild(make_row_elem("Interfaces", all_ifaces_ul));
+                configs_tbody.appendChild(make_row("Interfaces", all_ifaces_ul));
                 for (let iface of conf.interfaces) {
                     let iface_li = document.createElement('li');
                     all_ifaces_ul.appendChild(iface_li);
@@ -133,7 +124,7 @@ port.onMessage.addListener((m) => {
                         do_iface_alt_setting(iface.alts[0], iface_tbody);
                     } else {
                         let all_iface_alts_ul = document.createElement('ul');
-                        iface_tbody.appendChild(make_row_elem("All alt settings", all_iface_alts_ul));
+                        iface_tbody.appendChild(make_row("All alt settings", all_iface_alts_ul));
                         for (let iface_alt of iface.alts) {
 
                             let iface_alt_li = document.createElement('li');
