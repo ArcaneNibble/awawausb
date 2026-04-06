@@ -237,17 +237,6 @@ impl IOUSBDeviceStruct {
         length: u16,
         timeout: u32,
     ) -> Result<(), kern_return_t> {
-        log::debug!(
-            "control transfer, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
-            xfer_obj.txn_id,
-            request_type,
-            request,
-            value,
-            index,
-            length,
-            xfer_obj.buf
-        );
-
         // Prepare our object, which is a Box on the heap so that it doesn't move
         assert!(length as usize <= xfer_obj.buf.capacity());
         let buf_ptr = xfer_obj.buf.as_mut_ptr();

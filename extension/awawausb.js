@@ -37,8 +37,8 @@ function clean_up_usb_device_for_page(dev) {
 // which is a string of the form `pageID-txnID`
 // (page ID of 0 is reserved for special global control transfers)
 //
-// For an internal-use transaction, the data is [resolve, reject]
-// Otherwise, it's the below type
+// The result of the map is either [resolve, reject] (internal control transfers),
+// or else it's the below type (page transfers, global close)
 let usb_txns = new Map();
 
 class PageTransaction {
@@ -154,6 +154,31 @@ class UserPermissionDialog {
 
 // Page state
 
+// This helper function is used to abort all transactions,
+// which we need to do on page close as well as on explicit close
+function close_page_device(global_txn_id, page_usb_dev, global_usb_dev) {
+    // TODO: Abort all transactions
+    console.log("actual close");
+
+    page_usb_dev.opened = false;
+    global_usb_dev.opened--;
+    if (global_usb_dev.opened === 0) {
+        console.log("close global");
+        // We actually have to send a request to the stub now
+        usb_txns.set(global_txn_id, new PageTransaction((res) => {
+            // No errors are reported if closing fails
+            if (res.type === "RequestError") {
+                console.warn("Close operation failed!", res);
+            }
+        }));
+        nativeport.postMessage({
+            type: "CloseDevice",
+            sid: page_usb_dev.sid,
+            txn_id: global_txn_id,
+        });
+    }
+}
+
 // What we need to know (here, globally) about USBDevice objects in pages
 class PerPageUSBDevice {
     sid;
@@ -206,7 +231,23 @@ class PerPageState {
     }
     static delete_page(page_id) {
         console.log("page port disconnected!", page_id);
-        // TODO: Clean up opened devices?
+
+        // Close all devices
+        let page = PerPageState.#pages.get(page_id);
+        console.log(page);
+        for (let page_usb_dev of page.opened_devices.values()) {
+            console.log(page_usb_dev);
+            let global_usb_dev = usb_devices.get(page_usb_dev.sid);
+            console.log(global_usb_dev);
+            if (global_usb_dev === undefined) continue;
+
+            let this_txn_id = usb_global_txn++;
+            let txn_id = `0-${this_txn_id}`;
+
+            console.log(txn_id, page_usb_dev, global_usb_dev);
+            close_page_device(txn_id, page_usb_dev, global_usb_dev);
+        }
+
         PerPageState.#pages.delete(page_id);
     }
     static debug_pages() {
@@ -416,8 +457,6 @@ browser.runtime.onConnect.addListener((p) => {
                 dev_data,
             });
         } else if (m.type === "open") {
-            console.log("open attempt!");
-
             let usb_devs = get_usb_device(m);
             if (usb_devs === undefined) return;
             let [page_usb_dev, global_usb_dev] = usb_devs;
@@ -442,7 +481,6 @@ browser.runtime.onConnect.addListener((p) => {
                 return;
             }
 
-            console.log(page_usb_dev, global_usb_dev);
             // We actually have to send a request to the stub now
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
             usb_txns.set(global_txn_id, new PageTransaction((res) => {
@@ -465,8 +503,6 @@ browser.runtime.onConnect.addListener((p) => {
                 txn_id: global_txn_id,
             });
         } else if (m.type === "close") {
-            console.log("close attempt!");
-
             let usb_devs = get_usb_device(m);
             if (usb_devs === undefined) return;
             let [page_usb_dev, global_usb_dev] = usb_devs;
@@ -480,25 +516,9 @@ browser.runtime.onConnect.addListener((p) => {
                 return;
             }
 
-            // TODO: Abort all transactions
-            console.log("actual close");
-
-            page_usb_dev.opened = false;
-            global_usb_dev.opened--;
-            if (global_usb_dev.opened === 0) {
-                console.log("close global");
-                // We actually have to send a request to the stub now
-                let global_txn_id = `${this_page_id}-${m.txn_id}`;
-                usb_txns.set(global_txn_id, new PageTransaction((res) => {
-                    console.log("native cb close", res);
-                    // No errors are reported if closing fails
-                }));
-                nativeport.postMessage({
-                    type: "CloseDevice",
-                    sid: page_usb_dev.sid,
-                    txn_id: global_txn_id,
-                });
-            }
+            // Do the actual close operation, including aborting transactions
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            close_page_device(global_txn_id, page_usb_dev, global_usb_dev);
 
             // No errors are reported if closing fails
             p.postMessage({
@@ -772,19 +792,18 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let page_id = txn_id.split('-', 1)[0];
-        if (+page_id == 0) {
-            // Request directed for internal use
+        if (txn instanceof PageTransaction) {
+            if (txn.alive) {
+                txn.callback(m);
+            } else {
+                console.log("Completing a dead transaction", txn_id);
+            }
+        } else {
             let [resolve, _reject] = txn;
             resolve({
                 data,
                 babble: m.babble,
             });
-        } else {
-            // Requests directed at pages
-            if (txn.alive) {
-                txn.callback(m);
-            }
         }
     } else if (m.type === "RequestError") {
         let txn_id = m.txn_id;
@@ -795,16 +814,15 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let page_id = txn_id.split('-', 1)[0];
-        if (+page_id == 0) {
-            // Request directed for internal use
-            let [_resolve, reject] = txn;
-            reject(m.error);
-        } else {
-            // Requests directed at pages
+        if (txn instanceof PageTransaction) {
             if (txn.alive) {
                 txn.callback(m);
+            } else {
+                console.log("Completing a dead transaction", txn_id);
             }
+        } else {
+            let [_resolve, reject] = txn;
+            reject(m.error);
         }
     } else {
         console.log("Unexpected reply from native stub!", m);

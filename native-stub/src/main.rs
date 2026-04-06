@@ -372,6 +372,7 @@ impl USBStubEngine {
                         );
                         send_completion!(txn_id);
                     } else {
+                        log::debug!("device open, sid = {}, txn = {}", sid, txn_id);
                         if let Err(ret) = usb_dev._macos_dev.USBDeviceOpen() {
                             log::warn!(
                                 "USBDeviceOpen failed, sid = {}, txn = {}, ret = {:08x} ",
@@ -398,6 +399,7 @@ impl USBStubEngine {
                     if !usb_dev.opened {
                         send_error!(txn_id, InvalidState);
                     } else {
+                        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
                         if let Err(ret) = usb_dev._macos_dev.USBDeviceClose() {
                             log::warn!(
                                 "USBDeviceClose failed, sid = {}, txn = {}, ret = {:08x} ",
@@ -463,6 +465,18 @@ impl USBStubEngine {
 
                 let mut devices = self.usb_devices.borrow_mut();
                 if let Some(usb_dev) = devices.get_mut(&sid) {
+                    log::debug!(
+                        "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+                        sid,
+                        txn_id,
+                        request_type,
+                        request,
+                        value,
+                        index,
+                        len as u16,
+                        buf
+                    );
+
                     let xfer = USBTransfer {
                         dir,
                         txn_id: txn_id.clone(),
