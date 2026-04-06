@@ -138,13 +138,16 @@
 
     // Classes for the USB devices
     const DEV_HANDLE = Symbol("USBDevice.device_handle");
+    const DEV_DESC = Symbol("USBDevice.descriptors");
     // Map from numeric device handles to objects
     // (needed to maintain object equality when opening
     //  the same device over and over again)
     let dev_handle_to_obj_map = new Map();
     window.USBDevice = class {
         #device_handle;
-        #device_descriptors;
+        [DEV_DESC];
+        #configurations;
+        #active_config;
         constructor(dev_data) {
             // This song-and-dance helps to prevent user code from
             // trying to construct a USBDevice manually.
@@ -158,94 +161,272 @@
                 throw new TypeError("Illegal constructor");
             }
             this.#device_handle = devid_;
-            this.#device_descriptors = dev_data.descriptors;
+            this[DEV_DESC] = dev_data.descriptors;
+
+            // Now we need to mangle all the descriptors yet again
+            let active_config = null;
+            let configurations = new Array();
+            for (let conf of dev_data.descriptors.configs) {
+                let this_conf = new USBConfiguration(this, conf.bConfigurationValue);
+                configurations.push(this_conf);
+                if (conf.bConfigurationValue === dev_data.descriptors.current_config)
+                    active_config = this_conf;
+            }
+            Object.freeze(configurations);
+            this.#configurations = configurations;
+            this.#active_config = active_config;
         }
         get test() {
             return this.#device_handle;
         }
 
         get usbVersionMajor() {
-            return (this.#device_descriptors.bcdUSB >> 8) & 0xff;
+            return (this[DEV_DESC].bcdUSB >> 8) & 0xff;
         }
         get usbVersionMinor() {
-            return (this.#device_descriptors.bcdUSB >> 4) & 0xf;
+            return (this[DEV_DESC].bcdUSB >> 4) & 0xf;
         }
         get usbVersionSubminor() {
-            return this.#device_descriptors.bcdUSB & 0xf;
+            return this[DEV_DESC].bcdUSB & 0xf;
         }
         get deviceClass() {
-            return this.#device_descriptors.bDeviceClass;
+            return this[DEV_DESC].bDeviceClass;
         }
         get deviceSubclass() {
-            return this.#device_descriptors.bDeviceSubClass;
+            return this[DEV_DESC].bDeviceSubClass;
         }
         get deviceProtocol() {
-            return this.#device_descriptors.bDeviceProtocol;
+            return this[DEV_DESC].bDeviceProtocol;
         }
         get vendorId() {
-            return this.#device_descriptors.idVendor;
+            return this[DEV_DESC].idVendor;
         }
         get productId() {
-            return this.#device_descriptors.idProduct;
+            return this[DEV_DESC].idProduct;
         }
         get deviceVersionMajor() {
-            return (this.#device_descriptors.bcdDevice >> 8) & 0xff;
+            return (this[DEV_DESC].bcdDevice >> 8) & 0xff;
         }
         get deviceVersionMinor() {
-            return (this.#device_descriptors.bcdDevice >> 4) & 0x4f;
+            return (this[DEV_DESC].bcdDevice >> 4) & 0x4f;
         }
         get deviceVersionSubminor() {
-            return this.#device_descriptors.bcdDevice & 0xf;
+            return this[DEV_DESC].bcdDevice & 0xf;
         }
         get manufacturerName() {
-            return this.#device_descriptors.manufacturer;
+            return this[DEV_DESC].manufacturer;
         }
         get productName() {
-            return this.#device_descriptors.product;
+            return this[DEV_DESC].product;
         }
         get serialNumber() {
-            return this.#device_descriptors.serial;
+            return this[DEV_DESC].serial;
+        }
+
+        get configuration() {
+            return this.#active_config;
+        }
+        get configurations() {
+            return this.#configurations;
         }
     };
 
+    // FIXME: The below constructors do a bunch of redundant iterating
     const DEV_DESC_PARENT = Symbol("awawausb.descriptor_parent");
     window.USBConfiguration = class {
         [DEV_DESC_PARENT];
+        [DEV_DESC];
+        #configurationValue;
+        #configurationName;
+        #interfaces;
         constructor(device, configurationValue) {
             if (!(device instanceof USBDevice)) {
                 throw new TypeError("expected a USBDevice");
             }
             this[DEV_DESC_PARENT] = device;
+
+            let dev_desc = device[DEV_DESC];
+            for (let conf of dev_desc.configs) {
+                if (conf.bConfigurationValue === configurationValue) {
+                    this[DEV_DESC] = conf;
+                    this.#configurationValue = conf.bConfigurationValue;
+                    this.#configurationName = conf.config_name;
+
+                    let interfaces = new Array();
+                    for (let iface of conf.interfaces) {
+                        interfaces.push(new USBInterface(this, iface.bInterfaceNumber));
+                    }
+                    Object.freeze(interfaces);
+                    this.#interfaces = interfaces;
+                    return;
+                }
+            }
+
+            throw new RangeError(`configuration ${configurationValue} invalid`)
+        }
+
+        get configurationValue() {
+            return this.#configurationValue
+        }
+        get configurationName() {
+            return this.#configurationName
+        }
+        get interfaces() {
+            return this.#interfaces;
         }
     };
 
     window.USBInterface = class {
         [DEV_DESC_PARENT];
+        [DEV_DESC];
+        #interfaceNumber;
+        #alts;
+        #active_alt;
         constructor(configuration, interfaceNumber) {
             if (!(configuration instanceof USBConfiguration)) {
                 throw new TypeError("expected a USBConfiguration");
             }
             this[DEV_DESC_PARENT] = configuration;
+
+            let conf_desc = configuration[DEV_DESC];
+            for (let iface of conf_desc.interfaces) {
+                if (iface.bInterfaceNumber === interfaceNumber) {
+                    this[DEV_DESC] = iface;
+                    this.#interfaceNumber = iface.bInterfaceNumber;
+
+                    let active_alt = null;
+                    let alts = new Array();
+                    for (let alt of iface.alts) {
+                        let this_alt = new USBAlternateInterface(this, alt.bAlternateSetting);
+                        alts.push(this_alt);
+                        if (alt.bAlternateSetting === iface.current_alt_setting)
+                            active_alt = this_alt;
+                    }
+                    Object.freeze(alts);
+                    this.#alts = alts;
+                    this.#active_alt = active_alt;
+                    return;
+                }
+            }
+
+            throw new RangeError(`interface ${interfaceNumber} invalid`)
+        }
+
+        get interfaceNumber() {
+            return this.#interfaceNumber;
+        }
+        get alternate() {
+            return this.#active_alt;
+        }
+        get alternates() {
+            return this.#alts;
         }
     };
 
+    const EP_DIRS = ["out", "in"];
+    const EP_TYPES = ["control", "isochronous", "bulk", "interrupt"];
+
     window.USBAlternateInterface = class {
-        [DEV_DESC_PARENT];
+        [DEV_DESC];
+        #alternateSetting;
+        #interfaceClass;
+        #interfaceSubclass;
+        #interfaceProtocol;
+        #interfaceName;
+        #endpoints;
         constructor(deviceInterface, alternateSetting) {
             if (!(deviceInterface instanceof USBInterface)) {
                 throw new TypeError("expected a USBInterface");
             }
-            this[DEV_DESC_PARENT] = deviceInterface;
+
+            let iface_desc = deviceInterface[DEV_DESC];
+            for (let alt of iface_desc.alts) {
+                if (alt.bAlternateSetting === alternateSetting) {
+                    this[DEV_DESC] = alt;
+                    this.#alternateSetting = alt.bAlternateSetting;
+                    this.#interfaceClass = alt.bInterfaceClass;
+                    this.#interfaceSubclass = alt.bInterfaceSubClass;
+                    this.#interfaceProtocol = alt.bInterfaceProtocol;
+                    this.#interfaceName = alt.intf_name;
+
+                    let endpoints = new Array();
+                    for (let ep of alt.endpoints) {
+                        endpoints.push(new USBEndpoint(this,
+                            ep.bEndpointAddress & 0xf, EP_DIRS[(ep.bEndpointAddress >> 7) & 1]));
+                    }
+                    Object.freeze(endpoints);
+                    this.#endpoints = endpoints;
+                    return;
+                }
+            }
+
+            throw new RangeError(`interface ${deviceInterface.alternateSetting} alt ${alternateSetting} invalid`)
+        }
+
+        get alternateSetting() {
+            return this.#alternateSetting;
+        }
+        get interfaceClass() {
+            return this.#interfaceClass;
+        }
+        get interfaceSubclass() {
+            return this.#interfaceSubclass;
+        }
+        get interfaceProtocol() {
+            return this.#interfaceProtocol;
+        }
+        get interfaceName() {
+            return this.#interfaceName;
+        }
+        get endpoints() {
+            return this.#endpoints
         }
     };
 
     window.USBEndpoint = class {
-        [DEV_DESC_PARENT];
+        #endpointNumber;
+        #direction;
+        #type;
+        #packetSize;
         constructor(alternate, endpointNumber, direction) {
             if (!(alternate instanceof USBAlternateInterface)) {
                 throw new TypeError("expected a USBAlternateInterface");
             }
-            this[DEV_DESC_PARENT] = alternate;
+
+            let addr = endpointNumber;
+            if (direction === "in") {
+                addr |= 0x80;
+            } else if (direction === "out") {}
+            else {
+                throw new TypeError(`\`${direction}\` is not a valid USBDirection`);
+            }
+
+            let iface_desc = alternate[DEV_DESC];
+            for (let ep of iface_desc.endpoints) {
+                if (ep.bEndpointAddress === addr) {
+                    this.#endpointNumber = endpointNumber;
+                    this.#direction = direction;
+                    this.#type = EP_TYPES[ep.bmAttributes & 3];
+                    // XXX the spec is entirely contradictory as to how to interpret packetSize
+                    this.#packetSize = ep.wMaxPacketSize;
+                    return;
+                }
+            }
+
+            throw new RangeError(`endpoint ${endpointNumber} ${direction} invalid`)
+        }
+
+        get endpointNumber() {
+            return this.#endpointNumber;
+        }
+        get direction() {
+            return this.#direction;
+        }
+        get type() {
+            return this.#type;
+        }
+        get packetSize() {
+            return this.#packetSize;
         }
     };
 
