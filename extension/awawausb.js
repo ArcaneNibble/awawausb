@@ -184,8 +184,7 @@ class PerPageUSBDevice {
     abort_transactions(intf) {
         for (let txn_ref of this.transactions) {
             if (intf === -2 || (intf === -1 && txn_ref.intf !== -1) || (intf === txn_ref.intf)) {
-                console.log("aborting", txn_ref);
-
+                console.log("Transaction is aborted", txn_ref);
                 try {
                     this.page.port.postMessage({
                         txn_id: txn_ref.page_txn_id,
@@ -206,19 +205,19 @@ class PerPageUSBDevice {
     // Close this device, using the specified transaction ID to talk to the native stub.
     // We need to do this on page close as well as on explicit close
     close(global_txn_id) {
-        console.log("actual close");
         this.abort_transactions(-2);
 
         this.opened = false;
         this.global_usb_dev.opened--;
         if (this.global_usb_dev.opened === 0) {
-            console.log("close global");
             // We actually have to send a request to the stub now
             // This is not queued on the per-page device, and it cannot be aborted
             usb_txns.set(global_txn_id, new PageTransaction((res) => {
                 // No errors are reported if closing fails
                 if (res.type === "RequestError") {
                     console.warn("Close operation failed!", res);
+                } else {
+                    console.log("Device closed", this.sid);
                 }
             }));
             nativeport.postMessage({
@@ -299,13 +298,13 @@ class PerPageState {
     static new_page(port) {
         let this_page_id = PerPageState.#next_page_id++;
         let state = new PerPageState(this_page_id, port);
-        console.log("new page port!", this_page_id, port.sender);
+        console.log("New page opened!", this_page_id, port.sender);
         PerPageState.#pages.set(this_page_id, state);
 
         return [this_page_id, state];
     }
     static delete_page(page_id) {
-        console.log("page port disconnected!", page_id);
+        console.log("Page closed...", page_id);
 
         // Close all devices
         let page = PerPageState.#pages.get(page_id);
@@ -365,7 +364,6 @@ function matches_device_filter(dev, filt) {
                 }
             }
         }
-        // TODO: interface filter
     }
     if (filt.classCode !== null && dev.bDeviceClass !== filt.classCode) return false;
     if (filt.subclassCode !== null && dev.bDeviceSubClass !== filt.subclassCode) return false;
@@ -567,13 +565,12 @@ browser.runtime.onConnect.addListener((p) => {
             // We actually have to send a request to the stub now
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
             page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
-                console.log("native cb", res);
                 if (!map_native_error(m.txn_id, res)) {
                     // The open was (finally) successful
                     // NOTE: We *can* race and send redundant opens to the stub
                     page_usb_dev.global_usb_dev.opened++;
                     page_usb_dev.opened = true;
-                    console.log("open success!");
+                    console.log("Device successfully opened", page_usb_dev.sid);
                     p.postMessage({
                         txn_id: m.txn_id,
                         success: true,
@@ -670,7 +667,6 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Send the request
             page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
-                console.log("native cb ctrl xfer", res);
                 if (!map_native_error(m.txn_id, res)) {
                     p.postMessage({
                         txn_id: m.txn_id,

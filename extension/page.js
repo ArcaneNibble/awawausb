@@ -660,7 +660,7 @@
         async getDevices() {
             // NOTE: We don't actually actively re-enumerate anything
             // It's fine to just return all cached devices.
-            // TODO: This will eventually require invalidating unplugged devices.
+            // This works because we are actively notified when devices are unplugged.
             return Array.from(dev_handle_to_obj_map.values());
         }
 
