@@ -345,6 +345,25 @@ impl USBStubEngine {
                 let reply = serde_json::to_string(&reply).unwrap();
                 write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
             }
+            protocol::RequestMessage::OpenDevice { sid, txn_id } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get(&sid) {
+                    // TODO
+                    eprintln!("TODO: Open device");
+                    // send_error!(txn_id, TransferError);
+                    let notif = protocol::ResponseMessage::RequestComplete {
+                        txn_id,
+                        babble: false,
+                        data: None,
+                    };
+                    let notif = serde_json::to_string(&notif).unwrap();
+                    write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
             protocol::RequestMessage::ControlTransfer {
                 sid,
                 txn_id,

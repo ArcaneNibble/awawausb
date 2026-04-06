@@ -28,6 +28,7 @@ function clean_up_usb_device_for_page(dev) {
     let ret = structuredClone(dev);
 
     delete ret.webusb_landing_page;
+    delete ret.opened;
 
     return ret;
 }
@@ -35,7 +36,18 @@ function clean_up_usb_device_for_page(dev) {
 // All outstanding transactions, indexed by transaction ID,
 // which is a string of the form `pageID-txnID`
 // (page ID of 0 is reserved for special global control transfers)
+//
+// For an internal-use transaction, the data is [resolve, reject]
+// Otherwise, it's the below type
 let usb_txns = new Map();
+
+class PageTransaction {
+    alive = true;
+    callback;
+    constructor(cb) {
+        this.callback = cb;
+    }
+}
 
 // (Next) transaction ID for use in global scope
 let usb_global_txn = 0;
@@ -148,6 +160,9 @@ class PerPageUSBDevice {
     constructor(sid) {
         this.sid = sid;
     }
+
+    // The following state is tracked twice: here, and in the page.
+    opened = false;
 }
 
 // Actual per-page state. Pages are referenced by a numeric ID,
@@ -199,7 +214,7 @@ class PerPageState {
         for (let [page_id, state] of PerPageState.#pages) {
             let handles = new Array();
             for (let [handle_id, usb_dev] of state.opened_devices) {
-                handles.push([handle_id, usb_dev.sid]);
+                handles.push([handle_id, usb_dev.sid, usb_dev.opened]);
             }
             ret.push({
                 page_id,
@@ -276,6 +291,49 @@ browser.runtime.onConnect.addListener((p) => {
 
     // Create and stash the per-page state
     let [this_page_id, this_page] = PerPageState.new_page(p);
+
+    function get_usb_device(m) {
+        let page_usb_dev = this_page.opened_devices.get(m.dev_handle);
+        if (page_usb_dev === undefined) {
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: false,
+                error: "not_found",
+            });
+            return;
+        }
+
+        let global_usb_dev = usb_devices.get(page_usb_dev.sid);
+        if (global_usb_dev === undefined) {
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: false,
+                error: "not_found",
+            });
+            return;
+        }
+
+        return [page_usb_dev, global_usb_dev];
+    }
+
+    function map_native_error(txn_id, m) {
+        if (m.type === "RequestError") {
+            let mapped_error;
+            if (m.error === "DeviceNotFound")
+                mapped_error = "not_found";
+            else if (m.error === "Stall")
+                mapped_error = "stall";
+
+            p.postMessage({
+                txn_id,
+                success: false,
+                error: mapped_error,
+            });
+            return true;
+        }
+
+        return false;
+    }
 
     p.onDisconnect.addListener((_p) => {
         PerPageState.delete_page(this_page_id);
@@ -356,6 +414,55 @@ browser.runtime.onConnect.addListener((p) => {
                 success: true,
                 dev_handle,
                 dev_data,
+            });
+        } else if (m.type === "open") {
+            console.log("open attempt!");
+
+            let usb_devs = get_usb_device(m);
+            if (usb_devs === undefined) return;
+            let [page_usb_dev, global_usb_dev] = usb_devs;
+
+            // Already open _locally_?
+            if (page_usb_dev.opened) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: true,
+                });
+                return;
+            }
+
+            // Already open globally, but *not* locally?
+            if (global_usb_dev.opened > 0) {
+                global_usb_dev.opened++;
+                page_usb_dev.opened = true;
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: true,
+                });
+                return;
+            }
+
+            console.log(page_usb_dev, global_usb_dev);
+            // We actually have to send a request to the stub now
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            usb_txns.set(global_txn_id, new PageTransaction((res) => {
+                console.log("native cb", res);
+                if (!map_native_error(m.txn_id, res)) {
+                    // The open was (finally) successful
+                    // NOTE: We *can* race and send redundant opens to the stub
+                    global_usb_dev.opened++;
+                    page_usb_dev.opened = true;
+                    console.log("open success!");
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            }));
+            nativeport.postMessage({
+                type: "OpenDevice",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
             });
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);
@@ -614,7 +721,11 @@ nativeport.onMessage.addListener(async (m) => {
 
             current_config: m.current_config,
             configs,
+
+            // The following settings are for internal use only
+            // and are hidden from content pages
             webusb_landing_page,
+            opened: 0,
         });
     } else if (m.type === "UnplugDevice") {
         let sid = m.sid;
@@ -639,7 +750,7 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let [page_id, page_txn_id] = txn_id.split('-');
+        let page_id = txn_id.split('-', 1)[0];
         if (+page_id == 0) {
             // Request directed for internal use
             let [resolve, _reject] = txn;
@@ -649,14 +760,9 @@ nativeport.onMessage.addListener(async (m) => {
             });
         } else {
             // Requests directed at pages
-            let page_port = page_ports.get(+page_id);
-            console.log(page_port);
-            page_port.postMessage({
-                type: "RequestComplete",
-                txn: +page_txn_id,
-                data,
-                babble: m.babble,
-            });
+            if (txn.alive) {
+                txn.callback(m);
+            }
         }
     } else if (m.type === "RequestError") {
         let txn_id = m.txn_id;
@@ -667,20 +773,16 @@ nativeport.onMessage.addListener(async (m) => {
         }
         usb_txns.delete(txn_id);
 
-        let [page_id, page_txn_id] = txn_id.split('-');
+        let page_id = txn_id.split('-', 1)[0];
         if (+page_id == 0) {
             // Request directed for internal use
             let [_resolve, reject] = txn;
             reject(m.error);
         } else {
             // Requests directed at pages
-            let page_port = page_ports.get(+page_id);
-            console.log(page_port);
-            page_port.postMessage({
-                type: "RequestError",
-                txn: +page_txn_id,
-                error: m.error,
-            });
+            if (txn.alive) {
+                txn.callback(m);
+            }
         }
     } else {
         console.log("Unexpected reply from native stub!", m);

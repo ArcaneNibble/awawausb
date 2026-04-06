@@ -69,6 +69,7 @@ port.onMessage.addListener((m) => {
                 link.innerText = dev_info.webusb_landing_page;
                 tbody.appendChild(make_row("WebUSB landing page", link));
             }
+            tbody.appendChild(make_row("Open count", `${dev_info.opened}`));
             tbody.appendChild(make_row("Vendor ID", `0x${to_hex(dev_info.idVendor, 4)}`));
             tbody.appendChild(make_row("Product ID", `0x${to_hex(dev_info.idProduct, 4)}`));
             tbody.appendChild(make_row("Manufacturer name", dev_info.manufacturer));
@@ -159,11 +160,11 @@ port.onMessage.addListener((m) => {
 
             let table = document.createElement('table');
             let thead = document.createElement('thead');
-            thead.appendChild(make_row("Page device handle", "Session ID"));
+            thead.appendChild(make_row("Page device handle", "Session ID", "Opened?"));
             table.appendChild(thead);
             let tbody = document.createElement('tbody');
-            for (let [handle, sid] of page_ent.handles) {
-                tbody.appendChild(make_row(handle, sid));
+            for (let fields of page_ent.handles) {
+                tbody.appendChild(make_row(...fields));
             }
             table.appendChild(tbody);
             li.appendChild(table);

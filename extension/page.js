@@ -136,6 +136,16 @@
         }
     };
 
+    // Communication protocol support
+    function map_txn_error(e) {
+        if (e.error === "not_found") {
+            throw new DOMException("Device unplugged or not found", "NotFoundError");
+        } else {
+            console.log("ERR", e);
+            throw new DOMException("Transfer error", "NetworkError");
+        }
+    }
+
     // Classes for the USB devices
     const DEV_HANDLE = Symbol("USBDevice.device_handle");
     const DEV_DESC = Symbol("USBDevice.descriptors");
@@ -148,6 +158,11 @@
         [DEV_DESC];
         #configurations;
         #active_config;
+
+        // This state is tracked twice, but the state here is mostly useless.
+        // The state here is only used as indications to user code.
+        #opened = false;
+
         constructor(dev_data) {
             // This song-and-dance helps to prevent user code from
             // trying to construct a USBDevice manually.
@@ -176,8 +191,20 @@
             this.#configurations = configurations;
             this.#active_config = active_config;
         }
-        get test() {
-            return this.#device_handle;
+
+        // Here are the actual USB methods
+        async open() {
+            try {
+                await __awawausb_send_request({
+                    type: "open",
+                    dev_handle: this.#device_handle,
+                });
+
+                // Successful open?
+                this.#opened = true;
+            } catch (e) {
+                map_txn_error(e);
+            }
         }
 
         get usbVersionMajor() {
@@ -228,6 +255,10 @@
         }
         get configurations() {
             return this.#configurations;
+        }
+
+        get opened() {
+            return this.#opened;
         }
     };
 
