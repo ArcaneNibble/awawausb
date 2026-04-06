@@ -193,6 +193,8 @@
             throw new DOMException("Device not configured", "InvalidStateError");
         } else if (e.error === "abort") {
             throw new DOMException("Transfer aborted", "AbortError");
+        } else if (e.error === "invalid_value") {
+            throw new DOMException("Specified USB value is not valid", "NotFoundError");
         } else {
             console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");
@@ -221,6 +223,7 @@
     // Classes for the USB devices
     const DEV_HANDLE = Symbol("USBDevice.device_handle");
     const DEV_DESC = Symbol("USBDevice.descriptors");
+    const BACKDOOR_SET_ACTIVE_IFACE = Symbol("USBDevice._backdoor_set_active_interface");
     window.USBDevice = class {
         #device_handle;
         [DEV_DESC];
@@ -302,6 +305,39 @@
                     type: "reset",
                     dev_handle: this.#device_handle,
                 });
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+
+        async selectConfiguration(configurationValue) {
+            try {
+                configurationValue = configurationValue & 0xff;
+
+                await __awawausb_send_request({
+                    type: "set_config",
+                    dev_handle: this.#device_handle,
+                    configurationValue,
+                });
+
+                let found_conf = null;
+                for (let conf of this.#configurations) {
+                    if (conf.configurationValue === configurationValue) {
+                        found_conf = conf;
+                        break;
+                    }
+                }
+                this.#active_config = found_conf;
+                for (let iface of this.#active_config.interfaces) {
+                    let found_alt = null;
+                    for (let alt of iface.alternates) {
+                        if (alt.alternateSetting === 0) {
+                            found_alt = alt;
+                            break;
+                        }
+                    }
+                    iface[BACKDOOR_SET_ACTIVE_IFACE](found_alt);
+                }
             } catch (e) {
                 map_txn_error(e);
             }
@@ -481,6 +517,10 @@
             }
 
             throw new RangeError(`interface ${interfaceNumber} invalid`)
+        }
+
+        [BACKDOOR_SET_ACTIVE_IFACE](iface) {
+            this.#active_alt = iface;
         }
 
         get interfaceNumber() {

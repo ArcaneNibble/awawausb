@@ -125,4 +125,9 @@ pub enum RequestMessage {
         sid: String,
         txn_id: String,
     },
+    SetConfiguration {
+        sid: String,
+        txn_id: String,
+        value: u8,
+    },
 }

@@ -216,6 +216,10 @@ impl IOUSBDeviceStruct {
         let ret = unsafe { ((**self.0).GetConfiguration)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
+    pub fn SetConfiguration(&mut self, config: u8) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).SetConfiguration)(self.0 as *const (), config) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
 
     pub fn CreateInterfaceIterator(
         &mut self,

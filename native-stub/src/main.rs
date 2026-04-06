@@ -134,18 +134,45 @@ impl USBDevice {
         // Get current state
         // TODO: Does this generate unnecessary wakes and/or bus traffic?
         let current_config = usb_dev.GetConfiguration().ok()?;
+
+        let mut dev = USBDevice {
+            device_descriptor: dev_desc,
+            config_descriptors: config_descs,
+            vendor_name: str_manuf,
+            product_name: str_product,
+            serial_number: str_sn,
+
+            opened: false,
+            current_configuration_id: current_config,
+            current_alt_settings: HashMap::new(),
+
+            _macos_dev: usb_dev,
+            _macos_ifaces: Vec::new(),
+        };
+
+        // Open a handle to all the interfaces
+        dev.macos_probe_ifaces().ok()?;
+
+        Some(dev)
+    }
+
+    /// Open or re-open all interface handles, when switching configuration
+    pub(crate) fn macos_probe_ifaces(&mut self) -> Result<(), libc::kern_return_t> {
+        // Make sure we close all the existing handles first
+        self._macos_ifaces.clear();
+
         let mut alt_settings = HashMap::new();
 
         // Open interfaces
         let mut ifaces = Vec::new();
-        let iter_ifaces = usb_dev
+        let iter_ifaces = self
+            ._macos_dev
             .CreateInterfaceIterator(&IOUSBFindInterfaceRequest {
                 bInterfaceClass: 0xffff,
                 bInterfaceSubClass: 0xffff,
                 bInterfaceProtocol: 0xffff,
                 bAlternateSetting: 0xffff,
-            })
-            .ok()?;
+            })?;
 
         let mut iface_iokit;
         loop {
@@ -161,8 +188,8 @@ impl USBDevice {
             // The GetInterfaceNumber function indeed returns the bInterfaceNumber
             // which you might expect. It does *not* return a plain 0-based index
             // according to the ordering of the config descriptor.
-            let iface_num = usb_iface.GetInterfaceNumber().ok()?;
-            let alt_setting = usb_iface.GetAlternateSetting().ok()?;
+            let iface_num = usb_iface.GetInterfaceNumber()?;
+            let alt_setting = usb_iface.GetAlternateSetting()?;
             let old = alt_settings.insert(iface_num, alt_setting);
             if old.is_some() {
                 log::warn!("Duplicate interface?? {}", iface_num);
@@ -172,20 +199,10 @@ impl USBDevice {
         }
         unsafe { IOObjectRelease(iter_ifaces) };
 
-        Some(USBDevice {
-            device_descriptor: dev_desc,
-            config_descriptors: config_descs,
-            vendor_name: str_manuf,
-            product_name: str_product,
-            serial_number: str_sn,
+        self.current_alt_settings = alt_settings;
+        self._macos_ifaces = ifaces;
 
-            opened: false,
-            current_configuration_id: current_config,
-            current_alt_settings: alt_settings,
-
-            _macos_dev: usb_dev,
-            _macos_ifaces: ifaces,
-        })
+        Ok(())
     }
 }
 
@@ -440,6 +457,48 @@ impl USBStubEngine {
                         } else {
                             // Reset successful
                             send_completion!(txn_id);
+                        }
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
+            protocol::RequestMessage::SetConfiguration { sid, txn_id, value } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if !usb_dev.opened {
+                        send_error!(txn_id, InvalidState);
+                    } else {
+                        log::debug!(
+                            "device set config 0x{:02x}, sid = {}, txn = {}",
+                            value,
+                            sid,
+                            txn_id
+                        );
+                        if let Err(ret) = usb_dev._macos_dev.SetConfiguration(value) {
+                            log::warn!(
+                                "SetConfiguration failed, sid = {}, txn = {}, ret = {:08x} ",
+                                sid,
+                                txn_id,
+                                ret
+                            );
+                            send_error!(txn_id, TransferError);
+                        } else {
+                            // Set config successful
+                            usb_dev.current_configuration_id = value;
+                            if let Err(ret) = usb_dev.macos_probe_ifaces() {
+                                log::warn!(
+                                    "SetConfiguration failed reopening interfaces, sid = {}, txn = {}, ret = {:08x} ",
+                                    sid,
+                                    txn_id,
+                                    ret
+                                );
+                                send_error!(txn_id, TransferError);
+                            } else {
+                                send_completion!(txn_id);
+                            }
                         }
                     }
                 } else {

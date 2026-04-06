@@ -719,6 +719,63 @@ browser.runtime.onConnect.addListener((p) => {
                 sid: page_usb_dev.sid,
                 txn_id: global_txn_id,
             });
+        } else if (m.type === "set_config") {
+            // NOTE: Don't check open state here
+            // The spec mandates a particular order
+            let page_usb_dev = get_usb_device(m);
+            if (page_usb_dev === undefined) return;
+
+            // Validate the desired configuration
+            let conf = m.configurationValue & 0xff;
+            let found_conf;
+            for (let conf_desc of page_usb_dev.global_usb_dev.configs) {
+                if (conf_desc.bConfigurationValue === conf) {
+                    found_conf = conf_desc;
+                    break;
+                }
+            }
+            if (found_conf === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+
+            // *Now* we can check if it's open
+            if (!page_usb_dev.opened) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+
+            page_usb_dev.abort_transactions(-1);
+
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    console.log("Device configuration changed", page_usb_dev.sid, conf);
+                    page_usb_dev.global_usb_dev.current_config = conf;
+                    for (let iface of found_conf.interfaces) {
+                        // XXX: What happens if/when the OS does something _weird_ with alt settings?
+                        iface.current_alt_setting = 0;
+                    }
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            });
+            nativeport.postMessage({
+                type: "SetConfiguration",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                value: conf,
+            });
         } else if (m.type === "ctrl_xfer") {
             let page_usb_dev = get_usb_device(m, true);
             if (page_usb_dev === undefined) return;
