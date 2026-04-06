@@ -420,6 +420,32 @@ impl USBStubEngine {
                     send_error!(txn_id, DeviceNotFound);
                 }
             }
+            protocol::RequestMessage::ResetDevice { sid, txn_id } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if !usb_dev.opened {
+                        send_error!(txn_id, InvalidState);
+                    } else {
+                        log::debug!("device reset, sid = {}, txn = {}", sid, txn_id);
+                        if let Err(ret) = usb_dev._macos_dev.USBDeviceReEnumerate(0) {
+                            log::warn!(
+                                "USBDeviceReEnumerate failed, sid = {}, txn = {}, ret = {:08x} ",
+                                sid,
+                                txn_id,
+                                ret
+                            );
+                            send_error!(txn_id, TransferError);
+                        } else {
+                            // Reset successful
+                            send_completion!(txn_id);
+                        }
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
             protocol::RequestMessage::ControlTransfer {
                 sid,
                 txn_id,

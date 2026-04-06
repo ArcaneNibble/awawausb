@@ -178,7 +178,7 @@ class PerPageUSBDevice {
             cb(res);
         }));
     }
-    // -2   --> abort *everything* (closing)
+    // -2   --> abort *everything* (closing, reset)
     // -1   --> abort all interfaces, but not device-targeted transfers (change configuration)
     // >=0  --> abort on this interface
     abort_transactions(intf) {
@@ -699,6 +699,25 @@ browser.runtime.onConnect.addListener((p) => {
             p.postMessage({
                 txn_id: m.txn_id,
                 success: true,
+            });
+        } else if (m.type === "reset") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+            page_usb_dev.abort_transactions(-2);
+
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            });
+            nativeport.postMessage({
+                type: "ResetDevice",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
             });
         } else if (m.type === "ctrl_xfer") {
             let page_usb_dev = get_usb_device(m, true);

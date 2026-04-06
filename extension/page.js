@@ -296,6 +296,17 @@
             });
         }
 
+        async reset() {
+            try {
+                await __awawausb_send_request({
+                    type: "reset",
+                    dev_handle: this.#device_handle,
+                });
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+
         async controlTransferIn(setup, length) {
             setup = check_control_xfer_params(setup);
             try {

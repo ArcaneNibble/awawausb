@@ -121,4 +121,8 @@ pub enum RequestMessage {
         sid: String,
         txn_id: String,
     },
+    ResetDevice {
+        sid: String,
+        txn_id: String,
+    },
 }

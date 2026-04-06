@@ -227,6 +227,11 @@ impl IOUSBDeviceStruct {
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
 
+    pub fn USBDeviceReEnumerate(&mut self, options: u32) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).USBDeviceReEnumerate)(self.0 as *const (), options) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+
     pub fn ctrl_xfer(
         &mut self,
         mut xfer_obj: crate::USBTransfer,
