@@ -157,8 +157,8 @@ class UserPermissionDialog {
 // This helper function is used to abort all transactions,
 // which we need to do on page close as well as on explicit close
 function close_page_device(global_txn_id, page_usb_dev, global_usb_dev) {
-    // TODO: Abort all transactions
     console.log("actual close");
+    page_usb_dev.abort_transactions(-2);
 
     page_usb_dev.opened = false;
     global_usb_dev.opened--;
@@ -182,8 +182,10 @@ function close_page_device(global_txn_id, page_usb_dev, global_usb_dev) {
 
 // What we need to know (here, globally) about USBDevice objects in pages
 class PerPageUSBDevice {
+    page;
     sid;
-    constructor(sid) {
+    constructor(page, sid) {
+        this.page = page;
         this.sid = sid;
     }
 
@@ -193,9 +195,10 @@ class PerPageUSBDevice {
     transactions = new Set();
     // Queues a transaction, both locally *and* globally.
     // Callback will be called when it finishes
-    queue_transaction(global_txn_id, intf, cb) {
+    queue_transaction(global_txn_id, page_txn_id, intf, cb) {
         let txn_ref = {
-            txn_id: global_txn_id,
+            global_txn_id,
+            page_txn_id,
             intf,
         };
         this.transactions.add(txn_ref);
@@ -203,6 +206,30 @@ class PerPageUSBDevice {
             this.transactions.delete(txn_ref);
             cb(res);
         }));
+    }
+    // -2   --> abort *everything* (closing)
+    // -1   --> abort all interfaces, but not device-targeted transfers (change configuration)
+    // >=0  --> abort on this interface
+    abort_transactions(intf) {
+        for (let txn_ref of this.transactions) {
+            if (intf === -2 || (intf === -1 && txn_ref.intf !== -1) || (intf === txn_ref.intf)) {
+                console.log("aborting", txn_ref);
+
+                try {
+                    this.page.port.postMessage({
+                        txn_id: txn_ref.page_txn_id,
+                        success: false,
+                        error: "abort",
+                    });
+                } catch (e) {
+                    // It's okay if this fails. This usually happens when cleaning up after a closed page.
+                }
+
+                this.transactions.delete(txn_ref);
+                let global_txn = usb_txns.get(txn_ref.global_txn_id);
+                global_txn.alive = false;
+            }
+        }
     }
 }
 
@@ -227,7 +254,7 @@ class PerPageState {
         if (existing_handle !== undefined)
             return existing_handle;
 
-        let device_state = new PerPageUSBDevice(sid);
+        let device_state = new PerPageUSBDevice(this, sid);
         let this_device_handle = this.#next_device_id++;
         this.opened_devices.set(this_device_handle, device_state);
         this.sid_to_handle.set(sid, this_device_handle);
@@ -254,9 +281,11 @@ class PerPageState {
             let global_usb_dev = usb_devices.get(page_usb_dev.sid);
             if (global_usb_dev === undefined) continue;
 
-            let this_txn_id = usb_global_txn++;
-            let txn_id = `0-${this_txn_id}`;
-            close_page_device(txn_id, page_usb_dev, global_usb_dev);
+            if (page_usb_dev.opened) {
+                let this_txn_id = usb_global_txn++;
+                let txn_id = `0-${this_txn_id}`;
+                close_page_device(txn_id, page_usb_dev, global_usb_dev);
+            }
         }
 
         PerPageState.#pages.delete(page_id);
@@ -513,7 +542,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // We actually have to send a request to the stub now
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
-            page_usb_dev.queue_transaction(global_txn_id, -1, (res) => {
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
                 console.log("native cb", res);
                 if (!map_native_error(m.txn_id, res)) {
                     // The open was (finally) successful
@@ -618,7 +647,7 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // Send the request
-            page_usb_dev.queue_transaction(global_txn_id, -1, (res) => {
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
                 console.log("native cb ctrl xfer", res);
                 if (!map_native_error(m.txn_id, res)) {
                     p.postMessage({

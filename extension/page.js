@@ -144,6 +144,8 @@
             throw new DOMException("Device not open or interface not claimed", "InvalidStateError");
         } else if (e.error === "not_configured") {
             throw new DOMException("Device not configured", "InvalidStateError");
+        } else if (e.error === "abort") {
+            throw new DOMException("Transfer aborted", "AbortError");
         } else {
             console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");
