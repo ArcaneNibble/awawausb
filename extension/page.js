@@ -228,8 +228,8 @@
         async test(x) {
             console.log("test?");
             console.log(await __awawausb_send_request({
-                type: "echo",
-                msg: x,
+                type: "test_open_sid",
+                sid: x,
             }));
         }
         test2() {

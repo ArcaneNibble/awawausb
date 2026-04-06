@@ -20,6 +20,7 @@ nativeport.onDisconnect.addListener((p) => {
 const WEBUSB_PLATFORM_CAPABILITY = [0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x47, 0x8B, 0xFD, 0xA0, 0x76, 0x88, 0x15, 0xB6, 0x65];
 
 // All USB devices we possibly know about, indexed by session ID
+// XXX this structure is rather ad-hoc, because it contains a lot of Chapter-9 fields
 let usb_devices = new Map();
 
 // All outstanding transactions, indexed by transaction ID,
@@ -67,9 +68,67 @@ function internal_perform_control_transfer(
     return promise;
 }
 
-// List of page ports, with numeric IDs
-let page_ports = new Map();
-let next_port_id = 1;
+// Page state
+
+// What we need to know (here, globally) about USBDevice objects in pages
+class PerPageUSBDevice {
+    sid;
+    constructor(sid) {
+        this.sid = sid;
+    }
+}
+
+// Actual per-page state. Pages are referenced by a numeric ID,
+// and this state contains the reply messaging port as well as
+// the "authoritative" copy of the page's opened devices (USBDevice objects)
+class PerPageState {
+    port;
+    constructor(port) {
+        this.port = port;
+    }
+
+    // Map from device handle (numeric ID) to authoritative state
+    opened_devices = new Map();
+    #next_device_id = 0;
+    open_device(sid) {
+        let device_state = new PerPageUSBDevice(sid);
+        let this_device_handle = this.#next_device_id++;
+        this.opened_devices.set(this_device_handle, device_state);
+        return this_device_handle;
+    }
+
+    static #next_page_id = 1;
+    static #pages = new Map();
+    static new_page(port) {
+        let state = new PerPageState(port);
+
+        let this_page_id = PerPageState.#next_page_id++;
+        console.log("new page port!", this_page_id, port.sender);
+        PerPageState.#pages.set(this_page_id, state);
+
+        return [this_page_id, state];
+    }
+    static delete_page(page_id) {
+        console.log("page port disconnected!", page_id);
+        // TODO: Clean up opened devices?
+        PerPageState.#pages.delete(page_id);
+    }
+    static debug_pages() {
+        let ret = new Array();
+        for (let [page_id, state] of PerPageState.#pages) {
+            let handles = new Array();
+            for (let [handle_id, usb_dev] of state.opened_devices) {
+                handles.push([handle_id, usb_dev.sid]);
+            }
+            ret.push({
+                page_id,
+                url: state.port.sender.url,
+                handles,
+            });
+        }
+        return ret;
+    }
+}
 browser.runtime.onConnect.addListener((p) => {
     // These are *internal* pages which have special permissions
     if (p.sender.id === "awawausb@arcanenibble.com" && p.sender.url.startsWith("moz-extension://")) {
@@ -81,16 +140,9 @@ browser.runtime.onConnect.addListener((p) => {
                         devices: usb_devices,
                     })
                 } else if (m === "list_pages") {
-                    let pages = new Array();
-                    for (let [page_id, p] of page_ports) {
-                        pages.push({
-                            page_id,
-                            url: p.sender.url,
-                        });
-                    }
                     p.postMessage({
                         type: m,
-                        pages,
+                        pages: PerPageState.debug_pages(),
                     });
                 } else if (m === "list_txns") {
                     let txns = new Array();
@@ -109,17 +161,11 @@ browser.runtime.onConnect.addListener((p) => {
         return;
     }
 
-    let this_port_id = next_port_id++;
-    console.log("new page port!", this_port_id, p.sender);
-    page_ports.set(this_port_id, p);
-
-    // This is a port-locally-scoped transaction ID
-    // TODO: We probably need to generate this *from the page*
-    let port_txn_id = 0;
+    // Create and stash the per-page state
+    let [this_page_id, this_page] = PerPageState.new_page(p);
 
     p.onDisconnect.addListener((_p) => {
-        console.log("page port disconnected!", this_port_id);
-        page_ports.delete(this_port_id);
+        PerPageState.delete_page(this_page_id);
     });
 
     p.onMessage.addListener((m) => {
@@ -128,6 +174,14 @@ browser.runtime.onConnect.addListener((p) => {
                 txn_id: m.txn_id,
                 success: true,
                 msg: m.msg,
+            });
+        } else if (m.type === "test_open_sid") {
+            let dev_handle = this_page.open_device(m.sid);
+            console.log(dev_handle);
+            p.postMessage({
+                txn_id: m.txn_id,
+                success: true,
+                dev_handle,
             });
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);

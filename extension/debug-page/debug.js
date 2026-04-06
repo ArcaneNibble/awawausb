@@ -165,6 +165,17 @@ port.onMessage.addListener((m) => {
             li.value = page_ent.page_id;
             li.innerText = page_ent.url;
             list_pages_ol.appendChild(li);
+
+            let table = document.createElement('table');
+            let thead = document.createElement('thead');
+            thead.appendChild(make_row("Page device handle", "Session ID"));
+            table.appendChild(thead);
+            let tbody = document.createElement('tbody');
+            for (let [handle, sid] of page_ent.handles) {
+                tbody.appendChild(make_row(handle, sid));
+            }
+            table.appendChild(tbody);
+            li.appendChild(table);
         }
     } else if (m.type === "list_txns") {
         list_of_txns.replaceChildren();
