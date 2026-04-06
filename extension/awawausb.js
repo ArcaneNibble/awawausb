@@ -147,10 +147,12 @@ class UserPermissionDialog {
 
 // What we need to know (here, globally) about USBDevice objects in pages
 class PerPageUSBDevice {
+    dev_handle;
     page;
     sid;
     global_usb_dev;
-    constructor(page, sid, global_usb_dev) {
+    constructor(dev_handle, page, sid, global_usb_dev) {
+        this.dev_handle = dev_handle;
         this.page = page;
         this.sid = sid;
         this.global_usb_dev = global_usb_dev;
@@ -226,11 +228,12 @@ class PerPageUSBDevice {
     }
 
     get clean_up_usb_device_for_page() {
-        let ret = structuredClone(this.global_usb_dev);
-
-        delete ret.webusb_landing_page;
-        delete ret.opened;
-
+        let {
+            webusb_landing_page: _1,
+            opened: _2,
+            page_devices: _3,
+            ...ret
+        } = this.global_usb_dev;
         return ret;
     }
 }
@@ -239,8 +242,10 @@ class PerPageUSBDevice {
 // and this state contains the reply messaging port as well as
 // the "authoritative" copy of the page's opened devices (USBDevice objects)
 class PerPageState {
+    page_id;
     port;
-    constructor(port) {
+    constructor(page_id, port) {
+        this.page_id = page_id;
         this.port = port;
     }
 
@@ -261,19 +266,20 @@ class PerPageState {
             return [undefined, undefined];
         }
 
-        let page_usb_dev = new PerPageUSBDevice(this, sid, global_usb_dev);
         let this_device_handle = this.#next_device_id++;
+        let page_usb_dev = new PerPageUSBDevice(this_device_handle, this, sid, global_usb_dev);
         this.opened_devices.set(this_device_handle, page_usb_dev);
         this.sid_to_handle.set(sid, this_device_handle);
+        global_usb_dev.page_devices.add(page_usb_dev);
+        console.log(global_usb_dev);
         return [this_device_handle, page_usb_dev];
     }
 
     static #next_page_id = 1;
     static #pages = new Map();
     static new_page(port) {
-        let state = new PerPageState(port);
-
         let this_page_id = PerPageState.#next_page_id++;
+        let state = new PerPageState(this_page_id, port);
         console.log("new page port!", this_page_id, port.sender);
         PerPageState.#pages.set(this_page_id, state);
 
@@ -293,6 +299,10 @@ class PerPageState {
                 let txn_id = `0-${this_txn_id}`;
                 page_usb_dev.close(txn_id);
             }
+
+            // Since we are _closing_ closing, we not only have to close
+            // but we also need to invalidate the references from global->page usb object
+            global_usb_dev.page_devices.delete(page_usb_dev);
         }
 
         PerPageState.#pages.delete(page_id);
@@ -351,9 +361,15 @@ browser.runtime.onConnect.addListener((p) => {
         if (p.sender.url.endsWith("/debug-page/debug.html")) {
             p.onMessage.addListener((m) => {
                 if (m === "list_devices") {
+                    let devices = new Array();
+                    for (let [sid, usb_dev] of usb_devices) {
+                        let {page_devices, ...rest} = usb_dev;
+                        page_devices = Array.from(page_devices, (x) => [x.page.page_id, x.dev_handle]);
+                        devices.push([sid, {page_devices, ...rest}]);
+                    }
                     p.postMessage({
                         type: m,
-                        devices: usb_devices,
+                        devices,
                     })
                 } else if (m === "list_pages") {
                     p.postMessage({
@@ -908,6 +924,7 @@ nativeport.onMessage.addListener(async (m) => {
             // and are hidden from content pages
             webusb_landing_page,
             opened: 0,
+            page_devices: new Set(),
         });
     } else if (m.type === "UnplugDevice") {
         let sid = m.sid;

@@ -70,6 +70,14 @@ port.onMessage.addListener((m) => {
                 tbody.appendChild(make_row("WebUSB landing page", link));
             }
             tbody.appendChild(make_row("Open count", `${dev_info.opened}`));
+            let page_device_refs_ul = document.createElement('ul');
+            for (let [page_id, dev_handle] of dev_info.page_devices) {
+                let li = document.createElement('li');
+                li.innerText = `Page ${page_id} handle ${dev_handle}`;
+                page_device_refs_ul.appendChild(li);
+            }
+            tbody.appendChild(make_row("Page references", page_device_refs_ul));
+
             tbody.appendChild(make_row("Vendor ID", `0x${to_hex(dev_info.idVendor, 4)}`));
             tbody.appendChild(make_row("Product ID", `0x${to_hex(dev_info.idProduct, 4)}`));
             tbody.appendChild(make_row("Manufacturer name", dev_info.manufacturer));
