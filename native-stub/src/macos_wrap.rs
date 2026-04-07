@@ -462,6 +462,61 @@ impl IOUSBInterfaceStruct {
         if ret != 0 { Err(ret) } else { Ok(()) }
     }
 
+    pub fn isoc_xfer(
+        &mut self,
+        mut xfer_obj: Box<crate::USBTransferIsoc>,
+        pipe_ref: u8,
+        total_len: usize,
+    ) -> Result<(), kern_return_t> {
+        // Set up args (most of the preparing is already done)
+        assert!(total_len <= xfer_obj.buf.capacity());
+        let num_packets = xfer_obj.num_packets;
+        let buf_ptr = xfer_obj.buf.as_mut_ptr();
+        let dir = xfer_obj.dir;
+        let frame_list = xfer_obj._macos_frames.as_mut_ptr();
+        let xfer_ptr = Box::into_raw(xfer_obj);
+
+        let mut bus_frame = 0;
+        let mut bus_time = 0;
+        let ret = unsafe {
+            ((**self.0).GetBusFrameNumber)(self.0 as *const (), &mut bus_frame, &mut bus_time)
+        };
+        if ret != 0 {
+            return Err(ret);
+        }
+
+        // "Some time later"
+        bus_frame += 4;
+
+        let ret = match dir {
+            crate::USBTransferDirection::HostToDevice => unsafe {
+                ((**self.0).WriteIsochPipeAsync)(
+                    self.0 as *const (),
+                    pipe_ref,
+                    buf_ptr as *const (),
+                    bus_frame,
+                    num_packets as u32,
+                    frame_list,
+                    crate::USBStubEngine::iokit_usb_completion_isoc,
+                    xfer_ptr as *const (),
+                )
+            },
+            crate::USBTransferDirection::DeviceToHost => unsafe {
+                ((**self.0).ReadIsochPipeAsync)(
+                    self.0 as *const (),
+                    pipe_ref,
+                    buf_ptr as *mut (),
+                    bus_frame,
+                    num_packets as u32,
+                    frame_list,
+                    crate::USBStubEngine::iokit_usb_completion_isoc,
+                    xfer_ptr as *const (),
+                )
+            },
+        };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+
     pub fn ClearPipeStallBothEnds(&mut self, pipe_ref: u8) -> Result<(), kern_return_t> {
         let ret = unsafe { ((**self.0).ClearPipeStallBothEnds)(self.0 as *const (), pipe_ref) };
         if ret != 0 { Err(ret) } else { Ok(()) }

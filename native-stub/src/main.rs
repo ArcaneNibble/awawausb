@@ -51,6 +51,18 @@ pub struct USBTransfer {
     _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 
+#[derive(Debug)]
+/// A USB transfer, specifically for isochronous requests
+pub struct USBTransferIsoc {
+    pub dir: USBTransferDirection,
+    pub txn_id: String,
+    pub buf: Vec<u8>,
+    pub num_packets: usize,
+
+    _macos_frames: Box<[IOUSBIsocFrame]>,
+    _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
+}
+
 /// State regarding each interface
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct USBInterfaceState {
@@ -1134,6 +1146,125 @@ impl USBStubEngine {
                     send_error!(txn_id, DeviceNotFound);
                 }
             }
+            protocol::RequestMessage::IsocTransfer {
+                sid,
+                txn_id,
+                ep,
+                data,
+                pkt_len,
+            } => {
+                // Deal with data size limits
+                let mut total_len = 0;
+                let num_pkts = pkt_len.len();
+                if num_pkts > u32::MAX as usize {
+                    send_error!(txn_id, RequestTooBig);
+                    return true;
+                }
+                for l in &pkt_len {
+                    if *l > u16::MAX as u32 {
+                        send_error!(txn_id, RequestTooBig);
+                        return true;
+                    }
+                    total_len += *l as usize;
+                }
+
+                // Deal with data
+                let mut txn_ok = false;
+                let mut dir = USBTransferDirection::HostToDevice;
+                let mut buf = Vec::new();
+                if ep & usb_ch9::ch9_core::EP_DIR_IN != 0 {
+                    if data.is_none() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::DeviceToHost;
+                        buf = Vec::with_capacity(total_len);
+                    }
+                } else {
+                    if data.is_some() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::HostToDevice;
+                        buf = URL_SAFE_NO_PAD
+                            .decode(&data.unwrap())
+                            .expect("base64 decode error");
+                        if buf.len() != total_len {
+                            log::warn!("Wrong buffer size, sid = {}, txn = {}", sid, txn_id);
+                            buf.resize(total_len, 0);
+                        }
+                    }
+                }
+                assert!(txn_ok, "received malformed request");
+
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if usb_dev.opened {
+                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
+                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
+                                if iface_state.claimed {
+                                    if let Some((macos_idx, macos_piperef)) =
+                                        usb_dev._macos_ep_to_idx.get(&ep)
+                                    {
+                                        log::debug!(
+                                            "isoc transfer, sid = {}, txn = {}, {:02x} {:08x} {:02x?}",
+                                            sid,
+                                            txn_id,
+                                            ep,
+                                            total_len,
+                                            buf
+                                        );
+
+                                        let macos_isoc_frames = pkt_len
+                                            .iter()
+                                            .map(|x| IOUSBIsocFrame {
+                                                frStatus: 0,
+                                                frReqCount: *x as u16,
+                                                frActCount: 0,
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .into_boxed_slice();
+
+                                        let xfer = Box::new(USBTransferIsoc {
+                                            dir,
+                                            txn_id: txn_id.clone(),
+                                            buf,
+                                            num_packets: num_pkts,
+                                            _macos_frames: macos_isoc_frames,
+                                            _macos_iface: usb_dev._macos_ifaces[*macos_idx].clone(),
+                                        });
+
+                                        let mut mac_iface_obj =
+                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
+
+                                        if let Err(ret) =
+                                            mac_iface_obj.isoc_xfer(xfer, *macos_piperef, total_len)
+                                        {
+                                            log::warn!(
+                                                "Read/WriteIsocPipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                                                ep,
+                                                sid,
+                                                txn_id,
+                                                ret
+                                            );
+
+                                            send_error!(txn_id, TransferError);
+                                        }
+                                    } else {
+                                        send_error!(txn_id, InvalidNumber);
+                                    }
+                                } else {
+                                    send_error!(txn_id, InvalidState);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
+                        }
+                    } else {
+                        send_error!(txn_id, InvalidState);
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
         }
 
         true
@@ -1389,6 +1520,41 @@ impl USBStubEngine {
         }
 
         // n.b. the xfer will now be deallocated automagically
+    }
+
+    extern "C" fn iokit_usb_completion_isoc(
+        refcon: *const (),
+        result: libc::kern_return_t,
+        _arg0: *const (),
+    ) {
+        // Recover ownership of the transfer
+        // SAFETY: This was previously allocated via Box
+        let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransferIsoc) };
+
+        let mut pkt_status = Vec::with_capacity(xfer.num_packets);
+        let mut pkt_lens = Vec::with_capacity(xfer.num_packets);
+        let mut total_len = 0;
+        for i in 0..xfer.num_packets {
+            pkt_status.push(xfer._macos_frames[i].frStatus);
+            pkt_lens.push(xfer._macos_frames[i].frActCount);
+            total_len += xfer._macos_frames[i].frActCount as usize;
+        }
+        log::debug!("{:?} {:?} {}", pkt_status, pkt_lens, total_len);
+        if xfer.dir == USBTransferDirection::DeviceToHost {
+            // Update the size of received data
+            unsafe {
+                xfer.buf.set_len(total_len);
+            }
+        }
+
+        log::debug!(
+            "isoc request {} finished, err {:08x}, buf {:02x?} status {:08x?} len {:?}",
+            xfer.txn_id,
+            result,
+            xfer.buf,
+            pkt_status,
+            pkt_lens,
+        );
     }
 }
 impl Drop for USBStubEngine {

@@ -508,6 +508,44 @@
             }
         }
 
+
+        async isochronousTransferIn(endpointNumber, packetLengths) {
+            endpointNumber = (endpointNumber & 0xf) | 0x80;
+            packetLengths = Array.from(packetLengths, (x) => x & 0xffffffff);
+            try {
+                let res = await __awawausb_send_request({
+                    type: "isoc_xfer",
+                    dev_handle: this.#device_handle,
+                    endpointNumber,
+                    packetLengths,
+                });
+
+                console.log("isoc in done", res);
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+        async isochronousTransferOut(endpointNumber, data, packetLengths) {
+            endpointNumber = (endpointNumber & 0xf);
+            if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+                throw new TypeError("parameter is not a BufferSource");
+            }
+            packetLengths = Array.from(packetLengths, (x) => x & 0xffffffff);
+            try {
+                let res = await __awawausb_send_request({
+                    type: "isoc_xfer",
+                    dev_handle: this.#device_handle,
+                    endpointNumber,
+                    data,
+                    packetLengths,
+                });
+
+                console.log("isoc out done", res);
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
+
         get usbVersionMajor() {
             return (this[DEV_DESC].bcdUSB >> 8) & 0xff;
         }

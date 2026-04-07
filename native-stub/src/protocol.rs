@@ -129,6 +129,13 @@ pub enum RequestMessage {
         txn_id: String,
         ep: u8,
     },
+    IsocTransfer {
+        sid: String,
+        txn_id: String,
+        ep: u8,
+        data: Option<String>,
+        pkt_len: Vec<u32>,
+    },
 
     OpenDevice {
         sid: String,

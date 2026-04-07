@@ -1206,6 +1206,73 @@ browser.runtime.onConnect.addListener((p) => {
                 }
             });
             nativeport.postMessage(req_obj);
+        } else if (m.type === "isoc_xfer") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let ep = m.endpointNumber & 0xff;
+            let packetLengths = Array.from(m.packetLengths, (x) => x & 0xffffffff);
+
+            // Check interface
+            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            if (iface_ep === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+            let {iface, ep_obj} = iface_ep;
+            if (!page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+
+            let ep_type = ep_obj.bmAttributes & 3;
+            if (ep_type !== 1) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "bad_ep_type",
+                });
+                return;
+            }
+
+            // Prepare the request
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            let req_obj = {
+                type: "IsocTransfer",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                ep,
+                pkt_len: packetLengths,
+            }
+            if (!(ep & 0x80)) {
+                // host to device
+                let bytes = new Uint8Array(m.data);
+                req_obj.data = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+            }
+
+            // Send the request
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
+                console.log("isoc cb", res);
+
+                // if (!map_native_error(m.txn_id, res)) {
+                //     p.postMessage({
+                //         txn_id: m.txn_id,
+                //         success: true,
+                //         babble: res.babble,
+                //         data: res.data,
+                //         bytes_written: res.bytes_written,
+                //     });
+                // }
+            });
+            nativeport.postMessage(req_obj);
         } else {
             console.warn("Unknown request from a page", m, p.sender.url);
             p.postMessage({
