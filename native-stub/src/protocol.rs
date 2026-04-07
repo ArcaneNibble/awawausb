@@ -117,6 +117,13 @@ pub enum RequestMessage {
         length: Option<u16>,
         _timeout_internal: Option<u64>,
     },
+    DataTransfer {
+        sid: String,
+        txn_id: String,
+        ep: u8,
+        data: Option<String>,
+        length: Option<u32>,
+    },
 
     OpenDevice {
         sid: String,

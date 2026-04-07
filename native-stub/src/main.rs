@@ -179,7 +179,7 @@ impl USBDevice {
         };
 
         // Open a handle to all the interfaces
-        dev.macos_probe_ifaces().ok()?;
+        dev.macos_probe_ifaces(engine).ok()?;
         dev.reformat_config_descriptors();
 
         Some(dev)
@@ -299,9 +299,13 @@ impl USBDevice {
     }
 
     /// Open or re-open all interface handles, when switching configuration
-    pub(crate) fn macos_probe_ifaces(&mut self) -> Result<(), libc::kern_return_t> {
+    pub(crate) fn macos_probe_ifaces(
+        &mut self,
+        engine: Pin<&USBStubEngine>,
+    ) -> Result<(), libc::kern_return_t> {
         // Make sure we close all the existing handles first
         self._macos_ifaces.clear();
+        self._macos_ep_to_idx.clear();
 
         let mut if_states = HashMap::new();
 
@@ -326,6 +330,11 @@ impl USBDevice {
 
             // Takes ownership
             let mut usb_iface = unsafe { IOUSBInterfaceStruct::new(iface_iokit) };
+
+            // Create async event notification
+            let mach_port = usb_iface.CreateInterfaceAsyncPort()?;
+            engine.add_mach_port(mach_port).map_err(|_| 0)?; // FIXME
+            usb_iface.1 = &engine.actual_needed_event_sz;
 
             // NOTE: The macOS SDK documentation is either wrong or confusing.
             // The GetInterfaceNumber function indeed returns the bInterfaceNumber
@@ -673,7 +682,7 @@ impl USBStubEngine {
                         } else {
                             // Set config successful
                             usb_dev.current_configuration_id = value;
-                            if let Err(ret) = usb_dev.macos_probe_ifaces() {
+                            if let Err(ret) = usb_dev.macos_probe_ifaces(self) {
                                 log::warn!(
                                     "SetConfiguration failed reopening interfaces, sid = {}, txn = {}, ret = {:08x} ",
                                     sid,
@@ -960,6 +969,97 @@ impl USBStubEngine {
                             ret
                         );
                         send_error!(txn_id, TransferError);
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
+            protocol::RequestMessage::DataTransfer {
+                sid,
+                txn_id,
+                ep,
+                data,
+                length,
+            } => {
+                // Deal with data
+                let mut txn_ok = false;
+                let mut dir = USBTransferDirection::HostToDevice;
+                let mut buf = Vec::new();
+                let mut len = 0;
+                if ep & usb_ch9::ch9_core::EP_DIR_IN != 0 {
+                    if length.is_some() && data.is_none() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::DeviceToHost;
+                        len = length.unwrap() as usize;
+                        buf = Vec::with_capacity(len);
+                    }
+                } else {
+                    if data.is_some() && length.is_none() {
+                        txn_ok = true;
+                        dir = USBTransferDirection::HostToDevice;
+                        buf = URL_SAFE_NO_PAD
+                            .decode(&data.unwrap())
+                            .expect("base64 decode error");
+                        len = buf.len();
+                    }
+                }
+                assert!(txn_ok, "received malformed request");
+                // Deal with data size limits
+                if len > u32::MAX as usize {
+                    send_error!(txn_id, RequestTooBig);
+                    return true;
+                }
+
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if usb_dev.opened {
+                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
+                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
+                                if iface_state.claimed {
+                                    if let Some((macos_idx, macos_piperef)) =
+                                        usb_dev._macos_ep_to_idx.get(&ep)
+                                    {
+                                        log::debug!(
+                                            "bulk/interrupt transfer, sid = {}, txn = {}, {:02x} {:04x} {:02x?}",
+                                            sid,
+                                            txn_id,
+                                            ep,
+                                            len as u16,
+                                            buf
+                                        );
+
+                                        let xfer = USBTransfer {
+                                            dir,
+                                            txn_id: txn_id.clone(),
+                                            buf,
+                                        };
+
+                                        if let Err(ret) = usb_dev._macos_ifaces[*macos_idx]
+                                            .data_xfer(xfer, *macos_piperef, len as u32)
+                                        {
+                                            log::warn!(
+                                                "Read/WritePipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                                                ep,
+                                                sid,
+                                                txn_id,
+                                                ret
+                                            );
+                                            send_error!(txn_id, TransferError);
+                                        }
+                                    } else {
+                                        send_error!(txn_id, InvalidNumber);
+                                    }
+                                } else {
+                                    send_error!(txn_id, InvalidState);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
+                        }
+                    } else {
+                        send_error!(txn_id, InvalidState);
                     }
                 } else {
                     send_error!(txn_id, DeviceNotFound);

@@ -299,7 +299,10 @@ pub struct PipeProperties {
 }
 
 #[derive(Debug)]
-pub struct IOUSBInterfaceStruct(*mut *const IOUSBInterfaceStruct197);
+pub struct IOUSBInterfaceStruct(
+    *mut *const IOUSBInterfaceStruct197,
+    pub(crate) *const Cell<usize>,
+);
 #[allow(non_snake_case)]
 impl IOUSBInterfaceStruct {
     /// Turns an IOKit io_object_t into a USB interface interface
@@ -337,10 +340,15 @@ impl IOUSBInterfaceStruct {
             ((*plugin_iunk).Release)(iokit_plugin);
             IOObjectRelease(obj);
 
-            Self(device as *mut *const IOUSBInterfaceStruct197)
+            Self(device as *mut *const IOUSBInterfaceStruct197, ptr::null())
         }
     }
 
+    pub fn CreateInterfaceAsyncPort(&mut self) -> Result<mach_port_t, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).CreateInterfaceAsyncPort)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
     pub fn USBInterfaceOpen(&mut self) -> Result<(), kern_return_t> {
         let ret = unsafe { ((**self.0).USBInterfaceOpen)(self.0 as *const ()) };
         if ret != 0 { Err(ret) } else { Ok(()) }
@@ -416,11 +424,53 @@ impl IOUSBInterfaceStruct {
             Vec::new()
         }
     }
+
+    pub fn data_xfer(
+        &mut self,
+        mut xfer_obj: crate::USBTransfer,
+        pipe_ref: u8,
+        length: u32,
+    ) -> Result<(), kern_return_t> {
+        // Prepare our object, which is a Box on the heap so that it doesn't move
+        assert!(length as usize <= xfer_obj.buf.capacity());
+        let buf_ptr = xfer_obj.buf.as_mut_ptr();
+        let dir = xfer_obj.dir;
+        let xfer_ptr = Box::into_raw(Box::new(xfer_obj));
+
+        let ret = match dir {
+            crate::USBTransferDirection::HostToDevice => unsafe {
+                ((**self.0).WritePipeAsync)(
+                    self.0 as *const (),
+                    pipe_ref,
+                    buf_ptr as *const (),
+                    length,
+                    crate::USBStubEngine::iokit_usb_completion,
+                    xfer_ptr as *const (),
+                )
+            },
+            crate::USBTransferDirection::DeviceToHost => unsafe {
+                ((**self.0).ReadPipeAsync)(
+                    self.0 as *const (),
+                    pipe_ref,
+                    buf_ptr as *mut (),
+                    length,
+                    crate::USBStubEngine::iokit_usb_completion,
+                    xfer_ptr as *const (),
+                )
+            },
+        };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
 }
 impl Drop for IOUSBInterfaceStruct {
     fn drop(&mut self) {
         unsafe {
             ((**self.0).IUnknown.Release)(self.0 as *const ());
+            if !self.1.is_null() {
+                // Decrement needed event count
+                let needed_events = &*self.1;
+                needed_events.update(|x| x - 1);
+            }
         }
     }
 }

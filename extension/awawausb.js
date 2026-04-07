@@ -1057,7 +1057,7 @@ browser.runtime.onConnect.addListener((p) => {
             }
             if (req & 0x80) {
                 // device to host
-                req_obj.length = m.length>>>0;
+                req_obj.length = m.length & 0xffff;
             } else {
                 // host to device
                 let bytes = new Uint8Array(m.data);
@@ -1066,6 +1066,61 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Send the request
             page_usb_dev.queue_transaction(global_txn_id, m.txn_id, txn_iface, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                        babble: res.babble,
+                        data: res.data,
+                        bytes_written: res.bytes_written,
+                    });
+                }
+            });
+            nativeport.postMessage(req_obj);
+        } else if (m.type === "data_xfer") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let ep = m.endpointNumber & 0xff;
+
+            // Check interface
+            let iface = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            if (iface === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+            if (!page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+
+            // Prepare the request
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            let req_obj = {
+                type: "DataTransfer",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                ep,
+            }
+            if (ep & 0x80) {
+                // device to host
+                req_obj.length = m.length & 0xffffffff;
+            } else {
+                // host to device
+                let bytes = new Uint8Array(m.data);
+                req_obj.data = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+            }
+
+            // Send the request
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
                 if (!map_native_error(m.txn_id, res)) {
                     p.postMessage({
                         txn_id: m.txn_id,

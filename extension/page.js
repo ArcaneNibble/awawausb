@@ -415,7 +415,7 @@
                     type: "ctrl_xfer",
                     dev_handle: this.#device_handle,
                     setup,
-                    length: length>>>0
+                    length: length & 0xffff
                 });
 
                 let data = new DataView(res.data.buffer);
@@ -437,6 +437,46 @@
                     type: "ctrl_xfer",
                     dev_handle: this.#device_handle,
                     setup,
+                    data,
+                });
+
+                return new USBOutTransferResult("ok", res.bytes_written);
+            } catch (e) {
+                if (e.error === "stall")
+                    return new USBOutTransferResult("stall", e.bytes_written);
+                map_txn_error(e);
+            }
+        }
+
+        async transferIn(endpointNumber, length) {
+            endpointNumber = (endpointNumber & 0xf) | 0x80;
+            try {
+                let res = await __awawausb_send_request({
+                    type: "data_xfer",
+                    dev_handle: this.#device_handle,
+                    endpointNumber,
+                    length: length & 0xffffffff
+                });
+
+                let data = new DataView(res.data.buffer);
+                let ok_babble = res.babble ? "babble" : "ok";
+                return new USBInTransferResult(ok_babble, data);
+            } catch (e) {
+                if (e.error === "stall")
+                    return new USBInTransferResult("stall");
+                map_txn_error(e);
+            }
+        }
+        async transferOut(endpointNumber, data) {
+            endpointNumber = (endpointNumber & 0xf);
+            if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+                throw new TypeError("parameter is not a BufferSource");
+            }
+            try {
+                let res = await __awawausb_send_request({
+                    type: "data_xfer",
+                    dev_handle: this.#device_handle,
+                    endpointNumber,
                     data,
                 });
 
