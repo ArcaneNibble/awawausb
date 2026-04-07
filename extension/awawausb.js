@@ -1260,17 +1260,15 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Send the request
             page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
-                console.log("isoc cb", res);
-
-                // if (!map_native_error(m.txn_id, res)) {
-                //     p.postMessage({
-                //         txn_id: m.txn_id,
-                //         success: true,
-                //         babble: res.babble,
-                //         data: res.data,
-                //         bytes_written: res.bytes_written,
-                //     });
-                // }
+                if (!map_native_error(m.txn_id, res)) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                        data: res.data,
+                        pkt_status: res.pkt_status,
+                        pkt_len: res.pkt_len,
+                    });
+                }
             });
             nativeport.postMessage(req_obj);
         } else {
@@ -1574,6 +1572,30 @@ nativeport.onMessage.addListener(async (m) => {
                 data,
                 babble: m.babble,
             });
+        }
+    } else if (m.type === "IsocRequestComplete") {
+        let data = undefined;
+        if (m.data !== null && m.data !== undefined) {
+            data = Uint8Array.fromBase64(m.data, { alphabet: "base64url" });
+        }
+
+        let txn_id = m.txn_id;
+        let txn = usb_txns.get(txn_id);
+        if (txn === undefined) {
+            console.warn("Completing unknown transaction?", txn_id);
+            return;
+        }
+        usb_txns.delete(txn_id);
+
+        if (txn instanceof PageTransaction) {
+            if (txn.alive) {
+                m.data = data;
+                txn.callback(m);
+            } else {
+                console.log("Completing a dead transaction", txn_id);
+            }
+        } else {
+            console.warn("Internal-use isoc request not supported!");
         }
     } else if (m.type === "RequestError") {
         let txn_id = m.txn_id;

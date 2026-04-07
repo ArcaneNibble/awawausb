@@ -29,6 +29,13 @@ pub enum Errors {
     AlreadyClaimed,
 }
 
+#[derive(Debug, Serialize)]
+pub enum IsocPacketState {
+    Ok,
+    Babble,
+    Error,
+}
+
 #[allow(non_snake_case)]
 #[derive(Clone, Debug, Serialize)]
 pub struct DeviceEndpoint {
@@ -97,6 +104,12 @@ pub enum ResponseMessage {
         babble: bool,
         data: Option<String>,
         bytes_written: u64,
+    },
+    IsocRequestComplete {
+        txn_id: String,
+        data: Option<String>,
+        pkt_status: Vec<IsocPacketState>,
+        pkt_len: Vec<u32>,
     },
 }
 
