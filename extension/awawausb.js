@@ -1254,7 +1254,16 @@ browser.runtime.onConnect.addListener((p) => {
             }
             if (!(ep & 0x80)) {
                 // host to device
+                let total_len = packetLengths.reduce((a, b) => a + b, 0);
                 let bytes = new Uint8Array(m.data);
+                if (bytes.length !== total_len) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: false,
+                        error: "wrong_len",
+                    });
+                    return;
+                }
                 req_obj.data = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
             }
 

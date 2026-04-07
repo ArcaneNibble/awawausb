@@ -199,8 +199,9 @@
             throw new DOMException("Device or interface already open or claimed", "NetworkError");
         } else if (e.error === "bad_ep_type") {
             throw new DOMException("Wrong endpoint type", "InvalidAccessError");
+        } else if (e.error === "wrong_len") {
+            throw new DOMException("Wrong buffer size", "DataError");
         } else {
-            console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");
         }
     }
