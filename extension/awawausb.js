@@ -568,6 +568,12 @@ browser.runtime.onConnect.addListener((p) => {
                 mapped_error = "not_found";
             else if (m.error === "Stall")
                 mapped_error = "stall";
+            else if (m.error === "InvalidState")
+                mapped_error = "not_open";
+            else if (m.error === "InvalidNumber")
+                mapped_error = "invalid_value";
+            else if (m.error === "AlreadyClaimed")
+                mapped_error = "already_claimed";
 
             p.postMessage({
                 txn_id,
@@ -819,7 +825,6 @@ browser.runtime.onConnect.addListener((p) => {
             // Validate the desired interface by checking the global device
             // (which uses null vs undefined to distinguish)
             let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
-            console.log(iface_already_claimed);
             if (iface_already_claimed === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,

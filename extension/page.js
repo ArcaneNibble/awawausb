@@ -195,6 +195,8 @@
             throw new DOMException("Transfer aborted", "AbortError");
         } else if (e.error === "invalid_value") {
             throw new DOMException("Specified USB value is not valid", "NotFoundError");
+        } else if (e.error === "already_claimed") {
+            throw new DOMException("Device or interface already open or claimed", "NetworkError");
         } else {
             console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");

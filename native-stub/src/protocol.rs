@@ -25,6 +25,8 @@ pub enum Errors {
     InvalidState,
     /// A number (interface, endpoint) wasn't valid
     InvalidNumber,
+    /// An interface is already claimed
+    AlreadyClaimed,
 }
 
 #[allow(non_snake_case)]

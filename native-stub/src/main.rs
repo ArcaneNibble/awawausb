@@ -418,7 +418,11 @@ impl USBStubEngine {
                                 txn_id,
                                 ret
                             );
-                            send_error!(txn_id, TransferError);
+                            if ret == kIOReturnExclusiveAccess {
+                                send_error!(txn_id, AlreadyClaimed);
+                            } else {
+                                send_error!(txn_id, TransferError);
+                            }
                         } else {
                             // Open successful
                             usb_dev.opened = true;
@@ -589,7 +593,11 @@ impl USBStubEngine {
                                         txn_id,
                                         ret
                                     );
-                                    send_error!(txn_id, TransferError);
+                                    if ret == kIOReturnExclusiveAccess {
+                                        send_error!(txn_id, AlreadyClaimed);
+                                    } else {
+                                        send_error!(txn_id, TransferError);
+                                    }
                                 } else {
                                     // Claim interface successful
                                     iface_state.claimed = true;
