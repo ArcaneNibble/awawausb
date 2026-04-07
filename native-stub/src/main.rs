@@ -73,6 +73,10 @@ pub struct USBDevice {
     pub serial_number: Option<String>,
 
     pub reformatted_config_descriptors: Vec<DeviceConfiguration>,
+    /// Map from bEndpointAddress to bInterfaceNumber
+    ///
+    /// Different interfaces cannot use the same endpoints
+    pub ep_to_idx: HashMap<u8, u8>,
 
     pub opened: bool,
     pub current_configuration_id: u8,
@@ -82,7 +86,7 @@ pub struct USBDevice {
     /// Map from endpoint address to (interface index, pipeRef)
     ///
     /// (macOS specific)
-    _ep_to_idx: HashMap<u8, (usize, u8)>,
+    _macos_ep_to_idx: HashMap<u8, (usize, u8)>,
     _macos_dev: IOUSBDeviceStruct,
     _macos_ifaces: Vec<IOUSBInterfaceStruct>,
 }
@@ -163,12 +167,13 @@ impl USBDevice {
             serial_number: str_sn,
 
             reformatted_config_descriptors: Vec::new(),
+            ep_to_idx: HashMap::new(),
 
             opened: false,
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
 
-            _ep_to_idx: HashMap::new(),
+            _macos_ep_to_idx: HashMap::new(),
             _macos_dev: usb_dev,
             _macos_ifaces: Vec::new(),
         };
@@ -181,6 +186,7 @@ impl USBDevice {
     }
 
     pub(crate) fn reformat_config_descriptors(&mut self) {
+        let mut ep_to_idx = HashMap::new();
         let mut configs = Vec::new();
         for cfg_desc in &self.config_descriptors {
             let mut this_config_desc = None;
@@ -241,6 +247,18 @@ impl USBDevice {
                         if let Some(this_config_desc) = &mut this_config_desc {
                             if let Some(last_iface) = this_config_desc.interfaces.iter_mut().last()
                             {
+                                let old_iface = ep_to_idx
+                                    .insert(d.bEndpointAddress, last_iface.bInterfaceNumber);
+                                if let Some(old_iface) = old_iface {
+                                    if old_iface != last_iface.bInterfaceNumber {
+                                        log::warn!(
+                                            "Endpoints incorrectly duplicated across interfaces? ep 0x{:02x} in iface 0x{:02x}",
+                                            d.bEndpointAddress,
+                                            last_iface.bInterfaceNumber
+                                        );
+                                    }
+                                }
+
                                 last_iface.endpoints.push(protocol::DeviceEndpoint {
                                     bEndpointAddress: d.bEndpointAddress,
                                     bmAttributes: d.bmAttributes,
@@ -277,6 +295,7 @@ impl USBDevice {
         }
 
         self.reformatted_config_descriptors = configs;
+        self.ep_to_idx = ep_to_idx;
     }
 
     /// Open or re-open all interface handles, when switching configuration
@@ -719,7 +738,7 @@ impl USBStubEngine {
                                     assert_eq!(iface_state._macos_ep_addrs.len(), 0);
                                     let ep_nums = mac_iface_obj.get_ep_addrs();
                                     for (piperef_m1, ep) in ep_nums.iter().enumerate() {
-                                        let old = usb_dev._ep_to_idx.insert(
+                                        let old = usb_dev._macos_ep_to_idx.insert(
                                             *ep,
                                             (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
                                         );
@@ -777,7 +796,7 @@ impl USBStubEngine {
 
                                     // Update this !@#$ list
                                     for ep in iface_state._macos_ep_addrs.drain(..) {
-                                        usb_dev._ep_to_idx.remove(&ep);
+                                        usb_dev._macos_ep_to_idx.remove(&ep);
                                     }
 
                                     send_completion!(txn_id);
@@ -834,11 +853,11 @@ impl USBStubEngine {
 
                                     // Update this !@#$ list
                                     for ep in iface_state._macos_ep_addrs.drain(..) {
-                                        usb_dev._ep_to_idx.remove(&ep);
+                                        usb_dev._macos_ep_to_idx.remove(&ep);
                                     }
                                     let ep_nums = mac_iface_obj.get_ep_addrs();
                                     for (piperef_m1, ep) in ep_nums.iter().enumerate() {
-                                        let old = usb_dev._ep_to_idx.insert(
+                                        let old = usb_dev._macos_ep_to_idx.insert(
                                             *ep,
                                             (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
                                         );

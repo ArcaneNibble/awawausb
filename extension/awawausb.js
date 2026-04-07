@@ -263,6 +263,7 @@ class PerPageUSBDevice {
             opened: _2,
             page_devices: _3,
             interfaces_claimed: _4,
+            ep_to_idx: _5,
             ...ret
         } = this.global_usb_dev;
         return ret;
@@ -881,7 +882,6 @@ browser.runtime.onConnect.addListener((p) => {
             // Validate the desired interface by checking the global device
             // (which uses null vs undefined to distinguish)
             let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
-            console.log(iface_already_claimed);
             if (iface_already_claimed === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -929,7 +929,6 @@ browser.runtime.onConnect.addListener((p) => {
             // Validate the desired interface by checking the global device
             // (which uses null vs undefined to distinguish)
             let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
-            console.log(iface_already_claimed);
             if (iface_already_claimed === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1151,6 +1150,7 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         // Big data shuffle, for descriptors
+        let ep_to_idx = new Map();
         let iface_claimed = new Array();
         let configs = new Array();
         for (let cfg of m.configs) {
@@ -1186,6 +1186,7 @@ nativeport.onMessage.addListener(async (m) => {
                 // Endpoints
                 let eps = new Array();
                 for (let ep of intf.endpoints) {
+                    ep_to_idx.set(ep.bEndpointAddress, intf.bInterfaceNumber);
                     eps.push(ep);
                 }
 
@@ -1326,6 +1327,7 @@ nativeport.onMessage.addListener(async (m) => {
             webusb_landing_page,
             opened: 0,
             interfaces_claimed: iface_claimed,
+            ep_to_idx,
             page_devices: new Set(),
         };
         usb_devices.set(sid, global_usb_dev);

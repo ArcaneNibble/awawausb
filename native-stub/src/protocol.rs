@@ -117,6 +117,7 @@ pub enum RequestMessage {
         length: Option<u16>,
         _timeout_internal: Option<u64>,
     },
+
     OpenDevice {
         sid: String,
         txn_id: String,
@@ -134,6 +135,7 @@ pub enum RequestMessage {
         txn_id: String,
         value: u8,
     },
+
     ClaimInterface {
         sid: String,
         txn_id: String,
