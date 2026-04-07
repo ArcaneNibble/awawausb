@@ -50,12 +50,14 @@ pub struct USBTransfer {
 }
 
 /// State regarding each interface
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct USBInterfaceState {
     pub alt_setting: u8,
     pub claimed: bool,
 
     _macos_iface_idx: usize,
+    /// For (reverse) mapping from endpoint address to pipeRef
+    _macos_ep_addrs: Vec<u8>,
 }
 
 /// Handle for a USB device
@@ -77,6 +79,10 @@ pub struct USBDevice {
     /// Map from bInterfaceNumber to state
     pub current_if_state: HashMap<u8, USBInterfaceState>,
 
+    /// Map from endpoint address to (interface index, pipeRef)
+    ///
+    /// (macOS specific)
+    _ep_to_idx: HashMap<u8, (usize, u8)>,
     _macos_dev: IOUSBDeviceStruct,
     _macos_ifaces: Vec<IOUSBInterfaceStruct>,
 }
@@ -162,6 +168,7 @@ impl USBDevice {
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
 
+            _ep_to_idx: HashMap::new(),
             _macos_dev: usb_dev,
             _macos_ifaces: Vec::new(),
         };
@@ -313,6 +320,7 @@ impl USBDevice {
                     alt_setting,
                     claimed: false,
                     _macos_iface_idx: iface_idx,
+                    _macos_ep_addrs: Vec::new(),
                 },
             );
             if old.is_some() {
@@ -688,10 +696,9 @@ impl USBStubEngine {
                                     txn_id
                                 );
 
-                                if let Err(ret) = usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx]
-                                    .USBInterfaceOpen()
-                                {
+                                let mac_iface_obj =
+                                    &mut usb_dev._macos_ifaces[iface_state._macos_iface_idx];
+                                if let Err(ret) = mac_iface_obj.USBInterfaceOpen() {
                                     log::warn!(
                                         "USBInterfaceOpen failed {}, sid = {}, txn = {}, ret = {:08x} ",
                                         iface_state._macos_iface_idx,
@@ -707,6 +714,21 @@ impl USBStubEngine {
                                 } else {
                                     // Claim interface successful
                                     iface_state.claimed = true;
+
+                                    // Update this !@#$ list
+                                    assert_eq!(iface_state._macos_ep_addrs.len(), 0);
+                                    let ep_nums = mac_iface_obj.get_ep_addrs();
+                                    for (piperef_m1, ep) in ep_nums.iter().enumerate() {
+                                        let old = usb_dev._ep_to_idx.insert(
+                                            *ep,
+                                            (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
+                                        );
+                                        if old.is_some() {
+                                            log::warn!("Duplicate endpoint?! {:02x}", ep);
+                                        }
+                                    }
+                                    iface_state._macos_ep_addrs = ep_nums;
+
                                     send_completion!(txn_id);
                                 }
                             }
@@ -752,6 +774,12 @@ impl USBStubEngine {
                                 } else {
                                     // Release interface successful
                                     iface_state.claimed = false;
+
+                                    // Update this !@#$ list
+                                    for ep in iface_state._macos_ep_addrs.drain(..) {
+                                        usb_dev._ep_to_idx.remove(&ep);
+                                    }
+
                                     send_completion!(txn_id);
                                 }
                             }

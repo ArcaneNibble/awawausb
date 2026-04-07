@@ -289,6 +289,15 @@ impl Drop for IOUSBDeviceStruct {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PipeProperties {
+    direction: u8,
+    number: u8,
+    transfer_type: u8,
+    max_packet_size: u16,
+    interval: u8,
+}
+
 #[derive(Debug)]
 pub struct IOUSBInterfaceStruct(*mut *const IOUSBInterfaceStruct197);
 #[allow(non_snake_case)]
@@ -350,6 +359,58 @@ impl IOUSBInterfaceStruct {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetAlternateSetting)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
+    }
+    pub fn GetNumEndpoints(&mut self) -> Result<u8, kern_return_t> {
+        let mut out = 0;
+        let ret = unsafe { ((**self.0).GetNumEndpoints)(self.0 as *const (), &mut out) };
+        if ret != 0 { Err(ret) } else { Ok(out) }
+    }
+    pub fn GetPipeProperties(&mut self, pipe_ref: u8) -> Result<PipeProperties, kern_return_t> {
+        let mut direction = 0;
+        let mut number = 0;
+        let mut transfer_type = 0;
+        let mut max_packet_size = 0;
+        let mut interval = 0;
+        let ret = unsafe {
+            ((**self.0).GetPipeProperties)(
+                self.0 as *const (),
+                pipe_ref,
+                &mut direction,
+                &mut number,
+                &mut transfer_type,
+                &mut max_packet_size,
+                &mut interval,
+            )
+        };
+        if ret != 0 {
+            Err(ret)
+        } else {
+            Ok(PipeProperties {
+                direction,
+                number,
+                transfer_type,
+                max_packet_size,
+                interval,
+            })
+        }
+    }
+
+    pub fn get_ep_addrs(&mut self) -> Vec<u8> {
+        if let Ok(num_eps) = self.GetNumEndpoints() {
+            let mut ep_addrs = Vec::with_capacity(num_eps as usize);
+            for i in 0..num_eps {
+                if let Ok(pipe_props) = self.GetPipeProperties(i + 1) {
+                    ep_addrs
+                        .push(pipe_props.number | if pipe_props.direction != 0 { 0x80 } else { 0 });
+                } else {
+                    log::warn!("Could not get pipe {} info!", i + 1);
+                }
+            }
+            ep_addrs
+        } else {
+            log::warn!("Could not get endpoint list!");
+            Vec::new()
+        }
     }
 }
 impl Drop for IOUSBInterfaceStruct {
