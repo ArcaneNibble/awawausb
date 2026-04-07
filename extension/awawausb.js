@@ -1084,7 +1084,7 @@ browser.runtime.onConnect.addListener((p) => {
             let ep = m.endpointNumber & 0xff;
 
             // Check interface
-            let iface = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            let {iface, ep_obj} = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
             if (iface === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1098,6 +1098,16 @@ browser.runtime.onConnect.addListener((p) => {
                     txn_id: m.txn_id,
                     success: false,
                     error: "not_open",
+                });
+                return;
+            }
+
+            let ep_type = ep_obj.bmAttributes & 3;
+            if (ep_type !== 2 && ep_type !== 3) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "bad_ep_type",
                 });
                 return;
             }
@@ -1241,7 +1251,10 @@ nativeport.onMessage.addListener(async (m) => {
                 // Endpoints
                 let eps = new Array();
                 for (let ep of intf.endpoints) {
-                    ep_to_idx.set(ep.bEndpointAddress, intf.bInterfaceNumber);
+                    ep_to_idx.set(ep.bEndpointAddress, {
+                        iface: intf.bInterfaceNumber,
+                        ep_obj: ep,
+                    });
                     eps.push(ep);
                 }
 

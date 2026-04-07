@@ -197,6 +197,8 @@
             throw new DOMException("Specified USB value is not valid", "NotFoundError");
         } else if (e.error === "already_claimed") {
             throw new DOMException("Device or interface already open or claimed", "NetworkError");
+        } else if (e.error === "bad_ep_type") {
+            throw new DOMException("Wrong endpoint type", "InvalidAccessError");
         } else {
             console.log("ERR", e);
             throw new DOMException("Transfer error", "NetworkError");
