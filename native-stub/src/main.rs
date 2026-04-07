@@ -47,6 +47,15 @@ pub struct USBTransfer {
     pub buf: Vec<u8>,
 }
 
+/// State regarding each interface
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct USBInterfaceState {
+    pub alt_setting: u8,
+    pub claimed: bool,
+
+    _macos_iface_idx: usize,
+}
+
 /// Handle for a USB device
 ///
 /// May or may not be opened. Holds OS-specific handle,
@@ -61,7 +70,8 @@ pub struct USBDevice {
 
     pub opened: bool,
     pub current_configuration_id: u8,
-    pub current_alt_settings: HashMap<u8, u8>,
+    /// Map from bInterfaceNumber to state
+    pub current_if_state: HashMap<u8, USBInterfaceState>,
 
     _macos_dev: IOUSBDeviceStruct,
     _macos_ifaces: Vec<IOUSBInterfaceStruct>,
@@ -144,7 +154,7 @@ impl USBDevice {
 
             opened: false,
             current_configuration_id: current_config,
-            current_alt_settings: HashMap::new(),
+            current_if_state: HashMap::new(),
 
             _macos_dev: usb_dev,
             _macos_ifaces: Vec::new(),
@@ -161,10 +171,11 @@ impl USBDevice {
         // Make sure we close all the existing handles first
         self._macos_ifaces.clear();
 
-        let mut alt_settings = HashMap::new();
+        let mut if_states = HashMap::new();
 
         // Open interfaces
         let mut ifaces = Vec::new();
+        let mut iface_idx = 0;
         let iter_ifaces = self
             ._macos_dev
             .CreateInterfaceIterator(&IOUSBFindInterfaceRequest {
@@ -190,16 +201,24 @@ impl USBDevice {
             // according to the ordering of the config descriptor.
             let iface_num = usb_iface.GetInterfaceNumber()?;
             let alt_setting = usb_iface.GetAlternateSetting()?;
-            let old = alt_settings.insert(iface_num, alt_setting);
+            let old = if_states.insert(
+                iface_num,
+                USBInterfaceState {
+                    alt_setting,
+                    claimed: false,
+                    _macos_iface_idx: iface_idx,
+                },
+            );
             if old.is_some() {
                 log::warn!("Duplicate interface?? {}", iface_num);
             }
 
             ifaces.push(usb_iface);
+            iface_idx += 1;
         }
         unsafe { IOObjectRelease(iter_ifaces) };
 
-        self.current_alt_settings = alt_settings;
+        self.current_if_state = if_states;
         self._macos_ifaces = ifaces;
 
         Ok(())
@@ -419,6 +438,35 @@ impl USBStubEngine {
                         send_error!(txn_id, InvalidState);
                     } else {
                         log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
+
+                        // Release all interfaces before closing
+                        for (_, iface_state) in usb_dev.current_if_state.iter_mut() {
+                            if iface_state.claimed {
+                                log::debug!(
+                                    " -> releasing interface {}",
+                                    iface_state._macos_iface_idx
+                                );
+
+                                if let Err(ret) = usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx]
+                                    .USBInterfaceClose()
+                                {
+                                    log::warn!(
+                                        "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                                        iface_state._macos_iface_idx,
+                                        sid,
+                                        txn_id,
+                                        ret
+                                    );
+                                    // If closing an interface fails, don't mark it as closed
+                                    // but also don't report the failure to the host
+                                    // FIXME: How is this supposed to work?
+                                } else {
+                                    iface_state.claimed = false;
+                                }
+                            }
+                        }
+
                         if let Err(ret) = usb_dev._macos_dev.USBDeviceClose() {
                             log::warn!(
                                 "USBDeviceClose failed, sid = {}, txn = {}, ret = {:08x} ",
@@ -499,6 +547,102 @@ impl USBStubEngine {
                             } else {
                                 send_completion!(txn_id);
                             }
+                        }
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
+            protocol::RequestMessage::ClaimInterface { sid, txn_id, value } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if !usb_dev.opened {
+                        send_error!(txn_id, InvalidState);
+                    } else {
+                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&value) {
+                            if iface_state.claimed {
+                                log::debug!(
+                                    "Claiming already claimed interface 0x{:02x}, sid = {}, txn = {}",
+                                    value,
+                                    sid,
+                                    txn_id
+                                );
+                                send_completion!(txn_id);
+                            } else {
+                                log::debug!(
+                                    "device claim interface 0x{:02x}, sid = {}, txn = {}",
+                                    value,
+                                    sid,
+                                    txn_id
+                                );
+
+                                if let Err(ret) = usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx]
+                                    .USBInterfaceOpen()
+                                {
+                                    log::warn!(
+                                        "USBInterfaceOpen failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                                        iface_state._macos_iface_idx,
+                                        sid,
+                                        txn_id,
+                                        ret
+                                    );
+                                    send_error!(txn_id, TransferError);
+                                } else {
+                                    // Claim interface successful
+                                    iface_state.claimed = true;
+                                    send_completion!(txn_id);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
+                        }
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
+            protocol::RequestMessage::ReleaseInterface { sid, txn_id, value } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if !usb_dev.opened {
+                        send_error!(txn_id, InvalidState);
+                    } else {
+                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&value) {
+                            if !iface_state.claimed {
+                                send_error!(txn_id, InvalidState);
+                            } else {
+                                log::debug!(
+                                    "device release interface 0x{:02x}, sid = {}, txn = {}",
+                                    value,
+                                    sid,
+                                    txn_id
+                                );
+
+                                if let Err(ret) = usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx]
+                                    .USBInterfaceClose()
+                                {
+                                    log::warn!(
+                                        "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                                        iface_state._macos_iface_idx,
+                                        sid,
+                                        txn_id,
+                                        ret
+                                    );
+                                    send_error!(txn_id, TransferError);
+                                } else {
+                                    // Release interface successful
+                                    iface_state.claimed = false;
+                                    send_completion!(txn_id);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
                         }
                     }
                 } else {
@@ -715,11 +859,10 @@ impl USBStubEngine {
                                             .bConfigurationValue
                                             == usb_dev.current_configuration_id
                                         {
-                                            let current_alt_setting = usb_dev
-                                                .current_alt_settings
-                                                .get(&d.bInterfaceNumber);
-                                            match current_alt_setting {
-                                                Some(x) => *x,
+                                            let current_if_state =
+                                                usb_dev.current_if_state.get(&d.bInterfaceNumber);
+                                            match current_if_state {
+                                                Some(x) => x.alt_setting,
                                                 None => {
                                                     log::warn!(
                                                         "Descriptor has an interface 0x{:02x} we don't know about",

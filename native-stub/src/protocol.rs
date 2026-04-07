@@ -23,6 +23,8 @@ pub enum Errors {
     TransferError,
     /// Attempted to do something while the device is not properly opened or claimed
     InvalidState,
+    /// A number (interface, endpoint) wasn't valid
+    InvalidNumber,
 }
 
 #[allow(non_snake_case)]
@@ -126,6 +128,16 @@ pub enum RequestMessage {
         txn_id: String,
     },
     SetConfiguration {
+        sid: String,
+        txn_id: String,
+        value: u8,
+    },
+    ClaimInterface {
+        sid: String,
+        txn_id: String,
+        value: u8,
+    },
+    ReleaseInterface {
         sid: String,
         txn_id: String,
         value: u8,

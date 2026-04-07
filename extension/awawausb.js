@@ -162,6 +162,7 @@ class PerPageUSBDevice {
 
     // The following state is tracked twice: here, and in the page.
     opened = false;
+    claimed_interfaces = new Array();
 
     transactions = new Set();
     // Queues a transaction, both locally *and* globally.
@@ -233,6 +234,7 @@ class PerPageUSBDevice {
             webusb_landing_page: _1,
             opened: _2,
             page_devices: _3,
+            interfaces_claimed: _4,
             ...ret
         } = this.global_usb_dev;
         return ret;
@@ -760,10 +762,13 @@ browser.runtime.onConnect.addListener((p) => {
                 if (!map_native_error(m.txn_id, res)) {
                     console.log("Device configuration changed", page_usb_dev.sid, conf);
                     page_usb_dev.global_usb_dev.current_config = conf;
+                    let ifaces_claimed = new Array();
                     for (let iface of found_conf.interfaces) {
                         // XXX: What happens if/when the OS does something _weird_ with alt settings?
                         iface.current_alt_setting = 0;
+                        ifaces_claimed[iface.bInterfaceNumber] = null;
                     }
+                    page_usb_dev.global_usb_dev.interfaces_claimed = ifaces_claimed;
                     p.postMessage({
                         txn_id: m.txn_id,
                         success: true,
@@ -923,6 +928,7 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         // Big data shuffle, for descriptors
+        let iface_claimed = new Array();
         let configs = new Array();
         for (let cfg of m.configs) {
             // Configuration name string
@@ -944,6 +950,9 @@ nativeport.onMessage.addListener(async (m) => {
                     });
                     binterface_to_idx.set(intf.bInterfaceNumber, idx);
                 }
+
+                if (cfg.bConfigurationValue === m.current_config)
+                    iface_claimed[intf.bInterfaceNumber] = null;
 
                 // Interface (alternate) name string
                 let intf_name = null;
@@ -1093,6 +1102,7 @@ nativeport.onMessage.addListener(async (m) => {
             // and are hidden from content pages
             webusb_landing_page,
             opened: 0,
+            interfaces_claimed: iface_claimed,
             page_devices: new Set(),
         };
         usb_devices.set(sid, global_usb_dev);

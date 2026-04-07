@@ -332,6 +332,15 @@ impl IOUSBInterfaceStruct {
         }
     }
 
+    pub fn USBInterfaceOpen(&mut self) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).USBInterfaceOpen)(self.0 as *const ()) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+    pub fn USBInterfaceClose(&mut self) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).USBInterfaceClose)(self.0 as *const ()) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
+
     pub fn GetInterfaceNumber(&mut self) -> Result<u8, kern_return_t> {
         let mut out = 0;
         let ret = unsafe { ((**self.0).GetInterfaceNumber)(self.0 as *const (), &mut out) };
