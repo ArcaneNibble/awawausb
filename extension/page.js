@@ -520,7 +520,21 @@
                     packetLengths,
                 });
 
-                console.log("isoc in done", res);
+                let data = new DataView(res.data.buffer);
+                let packets = new Array();
+                let offs = 0;
+                for (let i = 0; i < res.pkt_status.length; i++) {
+                    let view = new DataView(data.buffer, offs, res.pkt_len[i]);
+                    offs += res.pkt_len[i];
+                    let status;
+                    if (res.pkt_status[i] === "Ok")
+                        status = "ok";
+                    else if (res.pkt_status[i] === "Babble")
+                        status = "babble";
+                    packets.push(new USBIsochronousInTransferPacket(status, view));
+                }
+                let result = new USBIsochronousInTransferResult(packets, data);
+                return result;
             } catch (e) {
                 map_txn_error(e);
             }
@@ -540,7 +554,18 @@
                     packetLengths,
                 });
 
-                console.log("isoc out done", res);
+                let packets = new Array();
+                for (let i = 0; i < res.pkt_status.length; i++) {
+                    let this_len = res.pkt_len[i];
+                    let status;
+                    if (res.pkt_status[i] === "Ok")
+                        status = "ok";
+                    else if (res.pkt_status[i] === "Babble")
+                        status = "babble";
+                    packets.push(new USBIsochronousOutTransferPacket(status, this_len));
+                }
+                let result = new USBIsochronousOutTransferResult(packets);
+                return result;
             } catch (e) {
                 map_txn_error(e);
             }
