@@ -224,6 +224,7 @@
     const DEV_HANDLE = Symbol("USBDevice.device_handle");
     const DEV_DESC = Symbol("USBDevice.descriptors");
     const BACKDOOR_SET_ACTIVE_IFACE = Symbol("USBDevice._backdoor_set_active_interface");
+    const BACKDOOR_IS_CLAIMED = Symbol("USBDevice._backdoor_is_claimed");
     window.USBDevice = class {
         #device_handle;
         [DEV_DESC];
@@ -233,7 +234,7 @@
         // This state is tracked twice, but the state here is mostly useless.
         // The state here is only used as indications to user code.
         #opened = false;
-        #claimed = new Array();
+        [BACKDOOR_IS_CLAIMED] = new Array();
 
         constructor(dev_data) {
             // This song-and-dance helps to prevent user code from
@@ -287,6 +288,7 @@
 
                 // Successful close?
                 this.#opened = false;
+                this[BACKDOOR_IS_CLAIMED] = new Array();
             } catch (e) {
                 map_txn_error(e);
             }
@@ -320,7 +322,7 @@
                     configurationValue,
                 });
 
-                this.#claimed = new Array();
+                this[BACKDOOR_IS_CLAIMED] = new Array();
                 let found_conf = null;
                 for (let conf of this.#configurations) {
                     if (conf.configurationValue === configurationValue) {
@@ -330,7 +332,7 @@
                 }
                 this.#active_config = found_conf;
                 for (let iface of this.#active_config.interfaces) {
-                    this.#claimed[iface.interfaceNumber] = false;
+                    this[BACKDOOR_IS_CLAIMED][iface.interfaceNumber] = false;
                     let found_alt = null;
                     for (let alt of iface.alternates) {
                         if (alt.alternateSetting === 0) {
@@ -355,7 +357,7 @@
                     interfaceNumber,
                 });
 
-                this.#claimed[interfaceNumber] = true;
+                this[BACKDOOR_IS_CLAIMED][interfaceNumber] = true;
             } catch (e) {
                 map_txn_error(e);
             }
@@ -370,7 +372,7 @@
                     interfaceNumber,
                 });
 
-                this.#claimed[interfaceNumber] = false;
+                this[BACKDOOR_IS_CLAIMED][interfaceNumber] = false;
             } catch (e) {
                 map_txn_error(e);
             }
@@ -564,6 +566,12 @@
         }
         get alternates() {
             return this.#alts;
+        }
+
+        get claimed() {
+            let conf_obj = this[DEV_DESC_PARENT];
+            let dev_obj = conf_obj[DEV_DESC_PARENT];
+            return !!dev_obj[BACKDOOR_IS_CLAIMED][this.#interfaceNumber];
         }
     };
 

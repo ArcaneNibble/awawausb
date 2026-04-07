@@ -938,12 +938,16 @@ browser.runtime.onConnect.addListener((p) => {
 
             if (m.setup.recipient === "device") {}
             else if (m.setup.recipient === "interface") {
-                // TODO
-                p.postMessage({
-                    txn_id: m.txn_id,
-                    success: false,
-                });
-                return;
+                let iface = m.setup.index & 0xff;
+                if (!page_usb_dev.claimed_interfaces[iface]) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: false,
+                        error: "not_open",
+                    });
+                    return;
+                }
+                req |= 1;
             } else if (m.setup.recipient === "endpoint") {
                 // TODO
                 p.postMessage({
