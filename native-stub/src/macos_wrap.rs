@@ -461,6 +461,11 @@ impl IOUSBInterfaceStruct {
         };
         if ret != 0 { Err(ret) } else { Ok(()) }
     }
+
+    pub fn ClearPipeStallBothEnds(&mut self, pipe_ref: u8) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).ClearPipeStallBothEnds)(self.0 as *const (), pipe_ref) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
 }
 impl Drop for IOUSBInterfaceStruct {
     fn drop(&mut self) {

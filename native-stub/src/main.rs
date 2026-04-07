@@ -1077,6 +1077,58 @@ impl USBStubEngine {
                     send_error!(txn_id, DeviceNotFound);
                 }
             }
+            protocol::RequestMessage::ClearHalt { sid, txn_id, ep } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if usb_dev.opened {
+                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
+                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
+                                if iface_state.claimed {
+                                    if let Some((macos_idx, macos_piperef)) =
+                                        usb_dev._macos_ep_to_idx.get(&ep)
+                                    {
+                                        log::debug!(
+                                            "clear halt, sid = {}, txn = {}, {:02x}",
+                                            sid,
+                                            txn_id,
+                                            ep,
+                                        );
+
+                                        let mut mac_iface_obj =
+                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
+                                        if let Err(ret) =
+                                            mac_iface_obj.ClearPipeStallBothEnds(*macos_piperef)
+                                        {
+                                            log::warn!(
+                                                "ClearPipeStallBothEnds failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                                                ep,
+                                                sid,
+                                                txn_id,
+                                                ret
+                                            );
+                                            send_error!(txn_id, TransferError);
+                                        } else {
+                                            send_completion!(txn_id);
+                                        }
+                                    } else {
+                                        send_error!(txn_id, InvalidNumber);
+                                    }
+                                } else {
+                                    send_error!(txn_id, InvalidState);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
+                        }
+                    } else {
+                        send_error!(txn_id, InvalidState);
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
         }
 
         true

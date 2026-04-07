@@ -1084,8 +1084,8 @@ browser.runtime.onConnect.addListener((p) => {
             let ep = m.endpointNumber & 0xff;
 
             // Check interface
-            let {iface, ep_obj} = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
-            if (iface === undefined) {
+            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            if (iface_ep === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
                     success: false,
@@ -1093,6 +1093,7 @@ browser.runtime.onConnect.addListener((p) => {
                 });
                 return;
             }
+            let {iface, ep_obj} = iface_ep;
             if (!page_usb_dev.claimed_interfaces[iface]) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1138,6 +1139,51 @@ browser.runtime.onConnect.addListener((p) => {
                         babble: res.babble,
                         data: res.data,
                         bytes_written: res.bytes_written,
+                    });
+                }
+            });
+            nativeport.postMessage(req_obj);
+        } else if (m.type === "clear_halt") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let ep = m.endpointNumber & 0xff;
+
+            // Check interface
+            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            if (iface_ep === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+            let iface = iface_ep.iface;
+            if (!page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+
+            // Prepare the request
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            let req_obj = {
+                type: "ClearHalt",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                ep,
+            }
+
+            // Send the request
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
                     });
                 }
             });

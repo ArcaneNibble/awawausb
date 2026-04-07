@@ -489,6 +489,24 @@
                 map_txn_error(e);
             }
         }
+        async clearHalt(direction, endpointNumber) {
+            endpointNumber = (endpointNumber & 0xf);
+            if (direction === "in") {
+                endpointNumber |= 0x80;
+            } else if (direction === "out") {}
+            else {
+                throw new TypeError(`\`${direction}\` is not a valid USBDirection`);
+            }
+            try {
+                await __awawausb_send_request({
+                    type: "clear_halt",
+                    dev_handle: this.#device_handle,
+                    endpointNumber,
+                });
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
 
         get usbVersionMajor() {
             return (this[DEV_DESC].bcdUSB >> 8) & 0xff;

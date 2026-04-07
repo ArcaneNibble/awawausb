@@ -124,6 +124,11 @@ pub enum RequestMessage {
         data: Option<String>,
         length: Option<u32>,
     },
+    ClearHalt {
+        sid: String,
+        txn_id: String,
+        ep: u8,
+    },
 
     OpenDevice {
         sid: String,
