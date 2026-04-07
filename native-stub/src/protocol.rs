@@ -30,7 +30,7 @@ pub enum Errors {
 }
 
 #[allow(non_snake_case)]
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DeviceEndpoint {
     pub bEndpointAddress: u8,
     pub bmAttributes: u8,
@@ -38,7 +38,7 @@ pub struct DeviceEndpoint {
 }
 
 #[allow(non_snake_case)]
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DeviceInterface {
     pub bInterfaceNumber: u8,
     pub bAlternateSetting: u8,
@@ -52,7 +52,7 @@ pub struct DeviceInterface {
 }
 
 #[allow(non_snake_case)]
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DeviceConfiguration {
     pub bConfigurationValue: u8,
     pub iConfiguration: u8,

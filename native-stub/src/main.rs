@@ -20,6 +20,8 @@ use macos_sys::*;
 use macos_wrap::*;
 use stdio_unix::*;
 
+use crate::protocol::DeviceConfiguration;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum USBTransferDirection {
     HostToDevice,
@@ -67,6 +69,8 @@ pub struct USBDevice {
     pub vendor_name: Option<String>,
     pub product_name: Option<String>,
     pub serial_number: Option<String>,
+
+    pub reformatted_config_descriptors: Vec<DeviceConfiguration>,
 
     pub opened: bool,
     pub current_configuration_id: u8,
@@ -152,6 +156,8 @@ impl USBDevice {
             product_name: str_product,
             serial_number: str_sn,
 
+            reformatted_config_descriptors: Vec::new(),
+
             opened: false,
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
@@ -162,8 +168,108 @@ impl USBDevice {
 
         // Open a handle to all the interfaces
         dev.macos_probe_ifaces().ok()?;
+        dev.reformat_config_descriptors();
 
         Some(dev)
+    }
+
+    pub(crate) fn reformat_config_descriptors(&mut self) {
+        let mut configs = Vec::new();
+        for cfg_desc in &self.config_descriptors {
+            let mut this_config_desc = None;
+            for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
+                match desc {
+                    usb_ch9::DescriptorRef::Config(d) => {
+                        if this_config_desc.is_some() {
+                            log::warn!("Bogus extra configuration descriptor? {:?}", desc)
+                        } else {
+                            this_config_desc = Some(protocol::DeviceConfiguration {
+                                bConfigurationValue: d.bConfigurationValue,
+                                iConfiguration: d.iConfiguration,
+                                interfaces: Vec::new(),
+                            });
+                        }
+                    }
+                    usb_ch9::DescriptorRef::Interface(d) => {
+                        if let Some(this_config_desc) = &mut this_config_desc {
+                            let current_alt_setting = if this_config_desc.bConfigurationValue
+                                == self.current_configuration_id
+                            {
+                                let current_if_state =
+                                    self.current_if_state.get(&d.bInterfaceNumber);
+                                match current_if_state {
+                                    Some(x) => x.alt_setting,
+                                    None => {
+                                        log::warn!(
+                                            "Descriptor has an interface 0x{:02x} we don't know about",
+                                            d.bInterfaceNumber
+                                        );
+                                        0
+                                    }
+                                }
+                            } else {
+                                // If the configuration isn't active, default the alt setting to 0
+                                0
+                            };
+
+                            this_config_desc.interfaces.push(protocol::DeviceInterface {
+                                bInterfaceNumber: d.bInterfaceNumber,
+                                bAlternateSetting: d.bAlternateSetting,
+                                bInterfaceClass: d.bInterfaceClass,
+                                bInterfaceSubClass: d.bInterfaceSubClass,
+                                bInterfaceProtocol: d.bInterfaceProtocol,
+                                iInterface: d.iInterface,
+
+                                current_alt_setting,
+                                endpoints: Vec::new(),
+                            });
+                        } else {
+                            log::warn!(
+                                "Bogus interface descriptor without config descriptor? {:?}",
+                                desc
+                            )
+                        }
+                    }
+                    usb_ch9::DescriptorRef::Endpoint(d) => {
+                        if let Some(this_config_desc) = &mut this_config_desc {
+                            if let Some(last_iface) = this_config_desc.interfaces.iter_mut().last()
+                            {
+                                last_iface.endpoints.push(protocol::DeviceEndpoint {
+                                    bEndpointAddress: d.bEndpointAddress,
+                                    bmAttributes: d.bmAttributes,
+                                    wMaxPacketSize: d.wMaxPacketSize,
+                                });
+                            } else {
+                                log::warn!(
+                                    "Bogus endpoint descriptor without interface descriptor? {:?}",
+                                    desc
+                                )
+                            }
+                        } else {
+                            log::warn!(
+                                "Bogus endpoint descriptor without config descriptor? {:?}",
+                                desc
+                            )
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if this_config_desc.is_none() {
+                log::warn!("Bogus configuration descriptor??");
+                // Put a dummy value in
+                this_config_desc = Some(protocol::DeviceConfiguration {
+                    bConfigurationValue: 0,
+                    iConfiguration: 0,
+                    interfaces: Vec::new(),
+                });
+            }
+
+            configs.push(this_config_desc.unwrap());
+        }
+
+        self.reformatted_config_descriptors = configs;
     }
 
     /// Open or re-open all interface handles, when switching configuration
@@ -842,107 +948,6 @@ impl USBStubEngine {
 
                 if let Some(usb_dev) = USBDevice::setup(item, self_) {
                     // Prepare notification (before we stuff the object away)
-                    let mut configs = Vec::new();
-                    for cfg_desc in &usb_dev.config_descriptors {
-                        let mut this_config_desc = None;
-                        for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
-                            match desc {
-                                usb_ch9::DescriptorRef::Config(d) => {
-                                    if this_config_desc.is_some() {
-                                        log::warn!(
-                                            "Bogus extra configuration descriptor? {:?}",
-                                            desc
-                                        )
-                                    } else {
-                                        this_config_desc = Some(protocol::DeviceConfiguration {
-                                            bConfigurationValue: d.bConfigurationValue,
-                                            iConfiguration: d.iConfiguration,
-                                            interfaces: Vec::new(),
-                                        });
-                                    }
-                                }
-                                usb_ch9::DescriptorRef::Interface(d) => {
-                                    if let Some(this_config_desc) = &mut this_config_desc {
-                                        let current_alt_setting = if this_config_desc
-                                            .bConfigurationValue
-                                            == usb_dev.current_configuration_id
-                                        {
-                                            let current_if_state =
-                                                usb_dev.current_if_state.get(&d.bInterfaceNumber);
-                                            match current_if_state {
-                                                Some(x) => x.alt_setting,
-                                                None => {
-                                                    log::warn!(
-                                                        "Descriptor has an interface 0x{:02x} we don't know about",
-                                                        d.bInterfaceNumber
-                                                    );
-                                                    0
-                                                }
-                                            }
-                                        } else {
-                                            // If the configuration isn't active, default the alt setting to 0
-                                            0
-                                        };
-
-                                        this_config_desc.interfaces.push(
-                                            protocol::DeviceInterface {
-                                                bInterfaceNumber: d.bInterfaceNumber,
-                                                bAlternateSetting: d.bAlternateSetting,
-                                                bInterfaceClass: d.bInterfaceClass,
-                                                bInterfaceSubClass: d.bInterfaceSubClass,
-                                                bInterfaceProtocol: d.bInterfaceProtocol,
-                                                iInterface: d.iInterface,
-
-                                                current_alt_setting,
-                                                endpoints: Vec::new(),
-                                            },
-                                        );
-                                    } else {
-                                        log::warn!(
-                                            "Bogus interface descriptor without config descriptor? {:?}",
-                                            desc
-                                        )
-                                    }
-                                }
-                                usb_ch9::DescriptorRef::Endpoint(d) => {
-                                    if let Some(this_config_desc) = &mut this_config_desc {
-                                        if let Some(last_iface) =
-                                            this_config_desc.interfaces.iter_mut().last()
-                                        {
-                                            last_iface.endpoints.push(protocol::DeviceEndpoint {
-                                                bEndpointAddress: d.bEndpointAddress,
-                                                bmAttributes: d.bmAttributes,
-                                                wMaxPacketSize: d.wMaxPacketSize,
-                                            });
-                                        } else {
-                                            log::warn!(
-                                                "Bogus endpoint descriptor without interface descriptor? {:?}",
-                                                desc
-                                            )
-                                        }
-                                    } else {
-                                        log::warn!(
-                                            "Bogus endpoint descriptor without config descriptor? {:?}",
-                                            desc
-                                        )
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if this_config_desc.is_none() {
-                            log::warn!("Bogus configuration descriptor??");
-                            // Put a dummy value in
-                            this_config_desc = Some(protocol::DeviceConfiguration {
-                                bConfigurationValue: 0,
-                                iConfiguration: 0,
-                                interfaces: Vec::new(),
-                            });
-                        }
-
-                        configs.push(this_config_desc.unwrap());
-                    }
                     let notif = protocol::ResponseMessage::NewDevice {
                         sid: sessionid.to_string(),
 
@@ -958,7 +963,7 @@ impl USBStubEngine {
                         serial: usb_dev.serial_number.clone(),
 
                         current_config: usb_dev.current_configuration_id,
-                        configs,
+                        configs: usb_dev.reformatted_config_descriptors.clone(),
                     };
 
                     let mut devices = self_.usb_devices.borrow_mut();
