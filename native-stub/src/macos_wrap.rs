@@ -365,6 +365,10 @@ impl IOUSBInterfaceStruct {
         let ret = unsafe { ((**self.0).GetNumEndpoints)(self.0 as *const (), &mut out) };
         if ret != 0 { Err(ret) } else { Ok(out) }
     }
+    pub fn SetAlternateInterface(&mut self, alt: u8) -> Result<(), kern_return_t> {
+        let ret = unsafe { ((**self.0).SetAlternateInterface)(self.0 as *const (), alt) };
+        if ret != 0 { Err(ret) } else { Ok(()) }
+    }
     pub fn GetPipeProperties(&mut self, pipe_ref: u8) -> Result<PipeProperties, kern_return_t> {
         let mut direction = 0;
         let mut number = 0;

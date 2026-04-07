@@ -144,4 +144,10 @@ pub enum RequestMessage {
         txn_id: String,
         value: u8,
     },
+    SetAltInterface {
+        sid: String,
+        txn_id: String,
+        iface: u8,
+        alt: u8,
+    },
 }

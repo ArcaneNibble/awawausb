@@ -379,6 +379,34 @@
                 map_txn_error(e);
             }
         }
+        async selectAlternateInterface(interfaceNumber, alternateSetting) {
+            try {
+                interfaceNumber = interfaceNumber & 0xff;
+                alternateSetting = alternateSetting & 0xff;
+
+                await __awawausb_send_request({
+                    type: "set_alt_interface",
+                    dev_handle: this.#device_handle,
+                    interfaceNumber,
+                    alternateSetting,
+                });
+
+                for (let iface of this.#active_config.interfaces) {
+                    if (iface.interfaceNumber === interfaceNumber) {
+                        let found_alt = null;
+                        for (let alt of iface.alternates) {
+                            if (alt.alternateSetting === alternateSetting) {
+                                found_alt = alt;
+                                break;
+                            }
+                        }
+                        iface[BACKDOOR_SET_ACTIVE_IFACE](found_alt);
+                    }
+                }
+            } catch (e) {
+                map_txn_error(e);
+            }
+        }
 
         async controlTransferIn(setup, length) {
             setup = check_control_xfer_params(setup);

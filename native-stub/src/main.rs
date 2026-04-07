@@ -791,6 +791,74 @@ impl USBStubEngine {
                     send_error!(txn_id, DeviceNotFound);
                 }
             }
+            protocol::RequestMessage::SetAltInterface {
+                sid,
+                txn_id,
+                iface,
+                alt,
+            } => {
+                let sid = sid.parse::<u64>().expect("received malformed request");
+
+                let mut devices = self.usb_devices.borrow_mut();
+                if let Some(usb_dev) = devices.get_mut(&sid) {
+                    if !usb_dev.opened {
+                        send_error!(txn_id, InvalidState);
+                    } else {
+                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
+                            if !iface_state.claimed {
+                                send_error!(txn_id, InvalidState);
+                            } else {
+                                log::debug!(
+                                    "device set alt interface 0x{:02x} 0x{:02x}, sid = {}, txn = {}",
+                                    iface,
+                                    alt,
+                                    sid,
+                                    txn_id
+                                );
+
+                                let mac_iface_obj =
+                                    &mut usb_dev._macos_ifaces[iface_state._macos_iface_idx];
+                                if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
+                                    log::warn!(
+                                        "SetAlternateInterface failed {} = {:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                                        iface_state._macos_iface_idx,
+                                        alt,
+                                        sid,
+                                        txn_id,
+                                        ret
+                                    );
+                                    send_error!(txn_id, TransferError);
+                                } else {
+                                    // Set alt interface successful
+                                    iface_state.alt_setting = alt;
+
+                                    // Update this !@#$ list
+                                    for ep in iface_state._macos_ep_addrs.drain(..) {
+                                        usb_dev._ep_to_idx.remove(&ep);
+                                    }
+                                    let ep_nums = mac_iface_obj.get_ep_addrs();
+                                    for (piperef_m1, ep) in ep_nums.iter().enumerate() {
+                                        let old = usb_dev._ep_to_idx.insert(
+                                            *ep,
+                                            (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
+                                        );
+                                        if old.is_some() {
+                                            log::warn!("Duplicate endpoint?! {:02x}", ep);
+                                        }
+                                    }
+                                    iface_state._macos_ep_addrs = ep_nums;
+
+                                    send_completion!(txn_id);
+                                }
+                            }
+                        } else {
+                            send_error!(txn_id, InvalidNumber);
+                        }
+                    }
+                } else {
+                    send_error!(txn_id, DeviceNotFound);
+                }
+            }
             protocol::RequestMessage::ControlTransfer {
                 sid,
                 txn_id,

@@ -855,7 +855,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Ok, we can finally try to claim the interface
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
-            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
                 if (!map_native_error(m.txn_id, res)) {
                     console.log("Interface successfully claimed", page_usb_dev.sid, iface);
                     page_usb_dev.global_usb_dev.interfaces_claimed[iface] = this_page_id;
@@ -902,7 +902,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Ok, we can finally try to release the interface
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
-            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
                 if (!map_native_error(m.txn_id, res)) {
                     console.log("Interface successfully released", page_usb_dev.sid, iface);
                     page_usb_dev.global_usb_dev.interfaces_claimed[iface] = null;
@@ -919,11 +919,91 @@ browser.runtime.onConnect.addListener((p) => {
                 txn_id: global_txn_id,
                 value: iface,
             });
+        } else if (m.type === "set_alt_interface") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let iface = m.interfaceNumber & 0xff;
+            let alt = m.alternateSetting & 0xff;
+
+            // Validate the desired interface by checking the global device
+            // (which uses null vs undefined to distinguish)
+            let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
+            console.log(iface_already_claimed);
+            if (iface_already_claimed === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+
+            // Not claimed by us?
+            if (!page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "not_open",
+                });
+                return;
+            }
+
+            // Make sure this alt setting exists
+            let found_iface_desc;
+            let found_alt = false;
+            for (let conf_desc of page_usb_dev.global_usb_dev.configs) {
+                if (conf_desc.bConfigurationValue === page_usb_dev.global_usb_dev.current_config) {
+                    for (let iface_desc of conf_desc.interfaces) {
+                        if (iface_desc.bInterfaceNumber === iface) {
+                            for (let alt_desc of iface_desc.alts) {
+                                if (alt_desc.bAlternateSetting === alt) {
+                                    found_iface_desc = iface_desc;
+                                    found_alt = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!found_alt) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+
+            // Abort all transfers
+            page_usb_dev.abort_transactions(iface);
+
+            // Ok, we can finally try to change the alt setting
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    console.log("Interface alt setting changed", page_usb_dev.sid, iface, alt);
+                    found_iface_desc.current_alt_setting = alt;
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            });
+            nativeport.postMessage({
+                type: "SetAltInterface",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                iface,
+                alt,
+            });
         } else if (m.type === "ctrl_xfer") {
             let page_usb_dev = get_usb_device(m, true);
             if (page_usb_dev === undefined) return;
 
             let req = 0;
+            let txn_iface = -1;
 
             if (m.length !== undefined)
                 req |= 0x80;    // device-to-host
@@ -953,6 +1033,7 @@ browser.runtime.onConnect.addListener((p) => {
                     return;
                 }
                 req |= 1;
+                txn_iface = iface;
             } else if (m.setup.recipient === "endpoint") {
                 // TODO
                 p.postMessage({
@@ -985,7 +1066,7 @@ browser.runtime.onConnect.addListener((p) => {
             }
 
             // Send the request
-            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, txn_iface, (res) => {
                 if (!map_native_error(m.txn_id, res)) {
                     p.postMessage({
                         txn_id: m.txn_id,
