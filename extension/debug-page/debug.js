@@ -126,8 +126,10 @@ document.getElementById("list_devices").addEventListener('click', async () => {
                 iface_details.appendChild(iface_table);
                 iface_li.appendChild(iface_details);
 
-                iface_tbody.appendChild(make_row("Current alt setting", `0x${to_hex(iface.current_alt_setting, 2)}`));
-                iface_tbody.appendChild(make_row("Claimed by page", `${dev_info.interfaces_claimed[iface.bInterfaceNumber]}`));
+                if (conf.bConfigurationValue === dev_info.current_config) {
+                    iface_tbody.appendChild(make_row("Current alt setting", `0x${to_hex(iface.current_alt_setting, 2)}`));
+                    iface_tbody.appendChild(make_row("Claimed by page", `${dev_info.interfaces_claimed[iface.bInterfaceNumber]}`));
+                }
 
                 if (iface.alts.length == 1) {
                     do_iface_alt_setting(iface.alts[0], iface_tbody);

@@ -208,6 +208,34 @@ class PerPageUSBDevice {
     close(global_txn_id) {
         this.abort_transactions(-2);
 
+        // Try to release each interface
+        for (let iface in this.claimed_interfaces) {
+            if (this.claimed_interfaces[iface]) {
+                console.log("Releasing interface on close...", this.sid, iface);
+                // We have to use the global scope for these requests,
+                // since we're already in the middle of a request.
+                let this_txn_id = usb_global_txn++;
+                let new_txn_id = `0-${this_txn_id}`;
+
+                usb_txns.set(new_txn_id, new PageTransaction((res) => {
+                    // No errors are reported if closing fails
+                    if (res.type === "RequestError") {
+                        console.warn("Interface release failed!", res);
+                    } else {
+                        console.log("Released interface on close", this.sid, iface);
+                        this.global_usb_dev.interfaces_claimed[iface] = null;
+                        this.claimed_interfaces[iface] = false;
+                    }
+                }));
+                nativeport.postMessage({
+                    type: "ReleaseInterface",
+                    sid: this.sid,
+                    txn_id: new_txn_id,
+                    value: +iface,  // XXX JS is silly
+                });
+            }
+        }
+
         this.opened = false;
         this.global_usb_dev.opened--;
         if (this.global_usb_dev.opened === 0) {
@@ -769,6 +797,7 @@ browser.runtime.onConnect.addListener((p) => {
                         ifaces_claimed[iface.bInterfaceNumber] = null;
                     }
                     page_usb_dev.global_usb_dev.interfaces_claimed = ifaces_claimed;
+                    page_usb_dev.claimed_interfaces = new Array();
                     p.postMessage({
                         txn_id: m.txn_id,
                         success: true,
@@ -780,6 +809,110 @@ browser.runtime.onConnect.addListener((p) => {
                 sid: page_usb_dev.sid,
                 txn_id: global_txn_id,
                 value: conf,
+            });
+        } else if (m.type === "claim_interface") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let iface = m.interfaceNumber & 0xff;
+
+            // Validate the desired interface by checking the global device
+            // (which uses null vs undefined to distinguish)
+            let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
+            console.log(iface_already_claimed);
+            if (iface_already_claimed === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+
+            // Already claimed by us?
+            if (page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: true,
+                });
+                return;
+            }
+
+            // Already claimed by another page?
+            if (iface_already_claimed !== null) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "already_claimed",
+                });
+                return;
+            }
+
+            // Ok, we can finally try to claim the interface
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    console.log("Interface successfully claimed", page_usb_dev.sid, iface);
+                    page_usb_dev.global_usb_dev.interfaces_claimed[iface] = this_page_id;
+                    page_usb_dev.claimed_interfaces[iface] = true;
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            });
+            nativeport.postMessage({
+                type: "ClaimInterface",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                value: iface,
+            });
+        } else if (m.type === "release_interface") {
+            let page_usb_dev = get_usb_device(m, true);
+            if (page_usb_dev === undefined) return;
+
+            let iface = m.interfaceNumber & 0xff;
+
+            // Validate the desired interface by checking the global device
+            // (which uses null vs undefined to distinguish)
+            let iface_already_claimed = page_usb_dev.global_usb_dev.interfaces_claimed[iface];
+            console.log(iface_already_claimed);
+            if (iface_already_claimed === undefined) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "invalid_value",
+                });
+                return;
+            }
+
+            // Not claimed by us?
+            if (!page_usb_dev.claimed_interfaces[iface]) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: true,
+                });
+                return;
+            }
+
+            // Ok, we can finally try to release the interface
+            let global_txn_id = `${this_page_id}-${m.txn_id}`;
+            page_usb_dev.queue_transaction(global_txn_id, m.txn_id, -1, (res) => {
+                if (!map_native_error(m.txn_id, res)) {
+                    console.log("Interface successfully released", page_usb_dev.sid, iface);
+                    page_usb_dev.global_usb_dev.interfaces_claimed[iface] = null;
+                    page_usb_dev.claimed_interfaces[iface] = false;
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: true,
+                    });
+                }
+            });
+            nativeport.postMessage({
+                type: "ReleaseInterface",
+                sid: page_usb_dev.sid,
+                txn_id: global_txn_id,
+                value: iface,
             });
         } else if (m.type === "ctrl_xfer") {
             let page_usb_dev = get_usb_device(m, true);
