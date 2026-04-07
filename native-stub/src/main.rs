@@ -1,11 +1,11 @@
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::mem;
 use std::pin::Pin;
 use std::ptr;
+use std::rc::Rc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use core_foundation::base::CFRetain;
@@ -47,6 +47,8 @@ pub struct USBTransfer {
     /// The kernel _may write_ to this buffer during the time we've
     /// given up ownership
     pub buf: Vec<u8>,
+
+    _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 
 /// State regarding each interface
@@ -88,7 +90,7 @@ pub struct USBDevice {
     /// (macOS specific)
     _macos_ep_to_idx: HashMap<u8, (usize, u8)>,
     _macos_dev: IOUSBDeviceStruct,
-    _macos_ifaces: Vec<IOUSBInterfaceStruct>,
+    _macos_ifaces: Vec<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 impl USBDevice {
     #[allow(non_snake_case)]
@@ -355,7 +357,7 @@ impl USBDevice {
                 log::warn!("Duplicate interface?? {}", iface_num);
             }
 
-            ifaces.push(usb_iface);
+            ifaces.push(Rc::new(RefCell::new(usb_iface)));
             iface_idx += 1;
         }
         unsafe { IOObjectRelease(iter_ifaces) };
@@ -593,10 +595,10 @@ impl USBStubEngine {
                                     iface_state._macos_iface_idx
                                 );
 
-                                if let Err(ret) = usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx]
-                                    .USBInterfaceClose()
-                                {
+                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx])
+                                    .borrow_mut();
+                                if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
                                     log::warn!(
                                         "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
                                         iface_state._macos_iface_idx,
@@ -724,8 +726,9 @@ impl USBStubEngine {
                                     txn_id
                                 );
 
-                                let mac_iface_obj =
-                                    &mut usb_dev._macos_ifaces[iface_state._macos_iface_idx];
+                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx])
+                                    .borrow_mut();
                                 if let Err(ret) = mac_iface_obj.USBInterfaceOpen() {
                                     log::warn!(
                                         "USBInterfaceOpen failed {}, sid = {}, txn = {}, ret = {:08x} ",
@@ -787,10 +790,10 @@ impl USBStubEngine {
                                     txn_id
                                 );
 
-                                if let Err(ret) = usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx]
-                                    .USBInterfaceClose()
-                                {
+                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx])
+                                    .borrow_mut();
+                                if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
                                     log::warn!(
                                         "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
                                         iface_state._macos_iface_idx,
@@ -844,8 +847,9 @@ impl USBStubEngine {
                                     txn_id
                                 );
 
-                                let mac_iface_obj =
-                                    &mut usb_dev._macos_ifaces[iface_state._macos_iface_idx];
+                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
+                                    [iface_state._macos_iface_idx])
+                                    .borrow_mut();
                                 if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
                                     log::warn!(
                                         "SetAlternateInterface failed {} = {:02x}, sid = {}, txn = {}, ret = {:08x} ",
@@ -950,6 +954,7 @@ impl USBStubEngine {
                         dir,
                         txn_id: txn_id.clone(),
                         buf,
+                        _macos_iface: None,
                     };
 
                     if let Err(ret) = usb_dev._macos_dev.ctrl_xfer(
@@ -1034,11 +1039,18 @@ impl USBStubEngine {
                                             dir,
                                             txn_id: txn_id.clone(),
                                             buf,
+                                            _macos_iface: Some(
+                                                usb_dev._macos_ifaces[*macos_idx].clone(),
+                                            ),
                                         };
 
-                                        if let Err(ret) = usb_dev._macos_ifaces[*macos_idx]
-                                            .data_xfer(xfer, *macos_piperef, len as u32)
-                                        {
+                                        let mut mac_iface_obj =
+                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
+                                        if let Err(ret) = mac_iface_obj.data_xfer(
+                                            xfer,
+                                            *macos_piperef,
+                                            len as u32,
+                                        ) {
                                             log::warn!(
                                                 "Read/WritePipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
                                                 ep,
