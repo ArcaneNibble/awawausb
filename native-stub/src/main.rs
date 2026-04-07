@@ -1058,7 +1058,12 @@ impl USBStubEngine {
                                                 txn_id,
                                                 ret
                                             );
-                                            send_error!(txn_id, TransferError);
+
+                                            if ret == kIOUSBPipeStalled {
+                                                send_error!(txn_id, Stall);
+                                            } else {
+                                                send_error!(txn_id, TransferError);
+                                            }
                                         }
                                     } else {
                                         send_error!(txn_id, InvalidNumber);

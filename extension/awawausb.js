@@ -1034,12 +1034,30 @@ browser.runtime.onConnect.addListener((p) => {
                 req |= 1;
                 txn_iface = iface;
             } else if (m.setup.recipient === "endpoint") {
-                // TODO
-                p.postMessage({
-                    txn_id: m.txn_id,
-                    success: false,
-                });
-                return;
+                let ep = m.setup.index & 0xffff;
+
+                // Check interface
+                let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+                if (iface_ep === undefined) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: false,
+                        error: "invalid_value",
+                    });
+                    return;
+                }
+                let iface = iface_ep.iface;
+                if (!page_usb_dev.claimed_interfaces[iface]) {
+                    p.postMessage({
+                        txn_id: m.txn_id,
+                        success: false,
+                        error: "not_open",
+                    });
+                    return;
+                }
+
+                req |= 2;
+                txn_iface = iface;
             } else if (m.setup.recipient === "other") {
                 req |= 3;
             }
