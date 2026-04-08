@@ -124,7 +124,10 @@ pub struct USBDevice {
 impl USBDevice {
     #[cfg(target_os = "macos")]
     #[allow(non_snake_case)]
-    pub fn setup(obj: io_object_t, engine: Pin<&USBStubEngine>) -> Option<Self> {
+    pub fn setup(
+        obj: io_object_t,
+        engine: Pin<&USBStubEngine>,
+    ) -> Result<Self, libc::kern_return_t> {
         // These are available in IOKit, but not on the interface API.
         // None of these gets (here or below) should ever fail on versions of macOS we support
         // (but, as a hack, we ignore failures here to avoid leaking the object).
@@ -139,21 +142,21 @@ impl USBDevice {
         let mut usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
 
         // Create async event notification
-        let mach_port = usb_dev.CreateDeviceAsyncPort().ok()?;
-        engine.add_mach_port(mach_port).ok()?;
+        let mach_port = usb_dev.CreateDeviceAsyncPort()?;
+        engine.add_mach_port(mach_port).map_err(|_| 0)?; // FIXME
         usb_dev.1 = &engine.actual_needed_event_sz;
 
         // Get device descriptor fields
-        let bDeviceClass = usb_dev.GetDeviceClass().ok()?;
-        let bDeviceSubClass = usb_dev.GetDeviceSubClass().ok()?;
-        let bDeviceProtocol = usb_dev.GetDeviceProtocol().ok()?;
-        let idVendor = usb_dev.GetDeviceVendor().ok()?;
-        let idProduct = usb_dev.GetDeviceProduct().ok()?;
-        let bcdDevice = usb_dev.GetDeviceReleaseNumber().ok()?;
-        let iManufacturer = usb_dev.USBGetManufacturerStringIndex().ok()?;
-        let iProduct = usb_dev.USBGetProductStringIndex().ok()?;
-        let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex().ok()?;
-        let bNumConfigurations = usb_dev.GetNumberOfConfigurations().ok()?;
+        let bDeviceClass = usb_dev.GetDeviceClass()?;
+        let bDeviceSubClass = usb_dev.GetDeviceSubClass()?;
+        let bDeviceProtocol = usb_dev.GetDeviceProtocol()?;
+        let idVendor = usb_dev.GetDeviceVendor()?;
+        let idProduct = usb_dev.GetDeviceProduct()?;
+        let bcdDevice = usb_dev.GetDeviceReleaseNumber()?;
+        let iManufacturer = usb_dev.USBGetManufacturerStringIndex()?;
+        let iProduct = usb_dev.USBGetProductStringIndex()?;
+        let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex()?;
+        let bNumConfigurations = usb_dev.GetNumberOfConfigurations()?;
 
         let dev_desc = usb_ch9::ch9_core::DeviceDescriptor {
             bLength: std::mem::size_of::<usb_ch9::ch9_core::DeviceDescriptor>() as u8,
@@ -175,7 +178,7 @@ impl USBDevice {
         // Get configuration descriptors
         let mut config_descs = Vec::new();
         for i in 0..bNumConfigurations {
-            let conf_desc = usb_dev.GetConfigurationDescriptorPtr(i).ok()?;
+            let conf_desc = usb_dev.GetConfigurationDescriptorPtr(i)?;
 
             // SAFETY: We read the initial configuration descriptor and then use its length
             // (which is what everybody just has to do here)
@@ -189,7 +192,7 @@ impl USBDevice {
 
         // Get current state
         // TODO: Does this generate unnecessary wakes and/or bus traffic?
-        let current_config = usb_dev.GetConfiguration().ok()?;
+        let current_config = usb_dev.GetConfiguration()?;
 
         let mut dev = USBDevice {
             device_descriptor: dev_desc,
@@ -211,11 +214,14 @@ impl USBDevice {
         };
 
         // Open a handle to all the interfaces
-        dev.macos_probe_ifaces(engine).ok()?;
+        dev.macos_probe_ifaces(engine)?;
         dev.reformat_config_descriptors();
 
-        Some(dev)
+        Ok(dev)
     }
+
+    // #[cfg(target_os = "linux")]
+    // pub fn setup() ->
 
     pub(crate) fn reformat_config_descriptors(&mut self) {
         let mut ep_to_idx = HashMap::new();
@@ -1555,37 +1561,44 @@ impl USBStubEngine {
             if let Some(sessionid) = sessionid {
                 log::debug!("plug, session = 0x{:x}", sessionid);
 
-                if let Some(usb_dev) = USBDevice::setup(item, self_) {
-                    // Prepare notification (before we stuff the object away)
-                    let notif = protocol::ResponseMessage::NewDevice {
-                        sid: sessionid.to_string(),
+                match USBDevice::setup(item, self_) {
+                    Ok(usb_dev) => {
+                        // Prepare notification (before we stuff the object away)
+                        let notif = protocol::ResponseMessage::NewDevice {
+                            sid: sessionid.to_string(),
 
-                        bcdUSB: usb_dev.device_descriptor.bcdUSB,
-                        bDeviceClass: usb_dev.device_descriptor.bDeviceClass,
-                        bDeviceSubClass: usb_dev.device_descriptor.bDeviceSubClass,
-                        bDeviceProtocol: usb_dev.device_descriptor.bDeviceProtocol,
-                        idVendor: usb_dev.device_descriptor.idVendor,
-                        idProduct: usb_dev.device_descriptor.idProduct,
-                        bcdDevice: usb_dev.device_descriptor.bcdDevice,
-                        manufacturer: usb_dev.vendor_name.clone(),
-                        product: usb_dev.product_name.clone(),
-                        serial: usb_dev.serial_number.clone(),
+                            bcdUSB: usb_dev.device_descriptor.bcdUSB,
+                            bDeviceClass: usb_dev.device_descriptor.bDeviceClass,
+                            bDeviceSubClass: usb_dev.device_descriptor.bDeviceSubClass,
+                            bDeviceProtocol: usb_dev.device_descriptor.bDeviceProtocol,
+                            idVendor: usb_dev.device_descriptor.idVendor,
+                            idProduct: usb_dev.device_descriptor.idProduct,
+                            bcdDevice: usb_dev.device_descriptor.bcdDevice,
+                            manufacturer: usb_dev.vendor_name.clone(),
+                            product: usb_dev.product_name.clone(),
+                            serial: usb_dev.serial_number.clone(),
 
-                        current_config: usb_dev.current_configuration_id,
-                        configs: usb_dev.reformatted_config_descriptors.clone(),
-                    };
+                            current_config: usb_dev.current_configuration_id,
+                            configs: usb_dev.reformatted_config_descriptors.clone(),
+                        };
 
-                    let mut devices = self_.usb_devices.borrow_mut();
-                    let old_dev = devices.insert(sessionid, usb_dev);
-                    if old_dev.is_some() {
-                        log::warn!("Got a duplicate sessionID?? 0x{:x}", sessionid);
+                        let mut devices = self_.usb_devices.borrow_mut();
+                        let old_dev = devices.insert(sessionid, usb_dev);
+                        if old_dev.is_some() {
+                            log::warn!("Got a duplicate sessionID?? 0x{:x}", sessionid);
+                        }
+
+                        // Send notification
+                        let notif = serde_json::to_string(&notif).unwrap();
+                        write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
                     }
-
-                    // Send notification
-                    let notif = serde_json::to_string(&notif).unwrap();
-                    write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-                } else {
-                    log::warn!("Device setup failed! session = 0x{:x}", sessionid);
+                    Err(err) => {
+                        log::warn!(
+                            "Device setup failed! session = 0x{:x}, err = 0x{:08x}",
+                            sessionid,
+                            err as u32
+                        );
+                    }
                 }
             } else {
                 log::warn!("Got plug notification without a sessionID??");
