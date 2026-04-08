@@ -1,8 +1,10 @@
 use std::alloc::Layout;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
+use std::u32;
 
 const MONITOR_GROUP_UDEV: u32 = 2;
 
@@ -176,6 +178,82 @@ impl UdevNetlinkSocket {
             return Err(io::Error::last_os_error());
         }
 
+        // Attach (hardcoded for usb) BPF optimization program
+        let mut bpf_prog = Vec::new();
+        {
+            use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, sock_filter};
+
+            macro_rules! check_u32 {
+                ($off:expr, $val:expr) => {
+                    bpf_prog.push(sock_filter {
+                        code: (BPF_LD | BPF_W | BPF_ABS) as u16,
+                        jt: 0,
+                        jf: 0,
+                        k: $off as u32,
+                    });
+                    bpf_prog.push(sock_filter {
+                        code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+                        jt: 1, // skip next opcode if equal
+                        jf: 0,
+                        k: $val,
+                    });
+                    bpf_prog.push(sock_filter {
+                        code: (BPF_RET | BPF_K) as u16,
+                        jt: 0,
+                        jf: 0,
+                        k: 0, // return 0 => no match
+                    });
+                };
+            }
+
+            // Yes, all the endianness here is correct
+            check_u32!(
+                mem::offset_of!(UdevFeedcafeMessageHeader, libudev_magic),
+                u32::from_be_bytes(*b"libu")
+            );
+            check_u32!(
+                mem::offset_of!(UdevFeedcafeMessageHeader, libudev_magic) + 4,
+                u32::from_be_bytes(*b"dev\x00")
+            );
+            check_u32!(
+                mem::offset_of!(UdevFeedcafeMessageHeader, version_magic),
+                0xfeedcafe
+            );
+            check_u32!(
+                mem::offset_of!(UdevFeedcafeMessageHeader, subsystem_hash),
+                murmur_hash_2(b"usb", 0)
+            );
+            check_u32!(
+                mem::offset_of!(UdevFeedcafeMessageHeader, devtype_hash),
+                murmur_hash_2(b"usb_device", 0)
+            );
+
+            // Finally accept the packet
+            bpf_prog.push(sock_filter {
+                code: (BPF_RET | BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: u32::MAX,
+            });
+        }
+        let filter = libc::sock_fprog {
+            len: bpf_prog.len() as u16,
+            filter: bpf_prog.as_mut_ptr(),
+        };
+        let ret = unsafe {
+            libc::setsockopt(
+                sock_fd,
+                libc::SOL_SOCKET,
+                libc::SO_ATTACH_FILTER,
+                &filter as *const _ as *const libc::c_void,
+                mem::size_of::<libc::sock_fprog>() as u32,
+            )
+        };
+        if ret < 0 {
+            log::warn!("attaching bpf failed!");
+            // This is okay, we'll just... not use the BPF filter
+        }
+
         Ok(out)
     }
 
@@ -197,7 +275,6 @@ impl UdevNetlinkSocket {
         // let mut buf = Vec::<u8>::with_capacity(pkt_sz as usize);
         let buf_layout =
             Layout::from_size_align(pkt_sz, mem::align_of::<UdevFeedcafeMessageHeader>()).unwrap();
-        dbg!(buf_layout);
         let buf = unsafe { std::alloc::alloc(buf_layout) };
 
         // We use recvmsg, even though we (currently) don't receive creds,
@@ -243,23 +320,31 @@ impl UdevNetlinkSocket {
                 sz: payload_sz,
             })
         };
+        // We perform these checks *even though* some of them are redundant with BPF
+        // (since we also don't hard-require BPF to work)
         pkt.mangle_and_validate().map_err(|_| {
             log::warn!("got a malformed udev packet!");
             io::Error::from(io::ErrorKind::Other)
         })?;
-        println!("{:x?}", pkt.hdr);
-        let props = pkt.properties().collect::<Vec<_>>();
-        println!("{:?}", props);
+        if pkt.hdr.subsystem_hash != murmur_hash_2(b"usb", 0)
+            || pkt.hdr.devtype_hash != murmur_hash_2(b"usb_device", 0)
+        {
+            // TODO: continue
+            return Ok(());
+        }
+        let props = pkt
+            .properties()
+            .map(|x| (x.key, x.val))
+            .collect::<HashMap<_, _>>();
         println!(
-            "{:08x} {:08x}",
-            pkt.hdr.subsystem_hash,
-            murmur_hash_2(b"usb", 0)
+            "{:?}",
+            props
+                .iter()
+                .map(|(k, v)| (String::from_utf8_lossy(k), v.map(String::from_utf8_lossy)))
+                .collect::<HashMap<_, _>>()
         );
-        println!(
-            "{:08x} {:08x}",
-            pkt.hdr.devtype_hash,
-            murmur_hash_2(b"usb_device", 0)
-        );
+
+        // TODO
 
         // todo
         Ok(())
