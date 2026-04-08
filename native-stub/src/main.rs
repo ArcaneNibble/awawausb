@@ -13,6 +13,8 @@ pub mod protocol;
 
 #[cfg(target_os = "linux")]
 mod udev_sys;
+#[cfg(target_os = "linux")]
+use udev_sys::*;
 
 #[cfg(target_os = "macos")]
 use kqueue_sys::*;
@@ -398,6 +400,13 @@ impl USBDevice {
     }
 }
 
+#[cfg(target_os = "linux")]
+const RUNLOOP_EPOLL_STDIN: u64 = 0;
+#[cfg(target_os = "linux")]
+const RUNLOOP_EPOLL_UDEV: u64 = 1;
+#[cfg(target_os = "linux")]
+const RUNLOOP_EPOLL_USB: u64 = 2;
+
 /// Main struct holding all of the state for our operations
 #[derive(Debug)]
 pub struct USBStubEngine {
@@ -410,10 +419,16 @@ pub struct USBStubEngine {
     // This is used by both epoll (Linux) and kqueue (macOS)
     actual_needed_event_sz: Cell<usize>,
 
+    #[cfg(target_os = "linux")]
     /// Number which will be incremented to uniquely identify devices,
     /// since Linux has no better way to do that
-    #[cfg(target_os = "linux")]
     next_session_id: Cell<u64>,
+    #[cfg(target_os = "linux")]
+    epoll_fd: i32,
+    #[cfg(target_os = "linux")]
+    epoll_buf: RefCell<Vec<libc::epoll_event>>,
+    #[cfg(target_os = "linux")]
+    udev_connection: UdevNetlinkSocket,
 
     #[cfg(target_os = "macos")]
     kqueue: i32,
@@ -437,6 +452,12 @@ impl USBStubEngine {
 
         // Create kqueue fd
         let kq = unsafe { kqueue() };
+        if kq < 0 {
+            panic!(
+                "failed to create kqueue {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
 
         // Set up a kevent for stdin
         let kevent_stdin = kevent::new(
@@ -541,17 +562,61 @@ impl USBStubEngine {
     ) -> pin_init::InitResult<'_, Self, Infallible> {
         let v = this.get_mut().as_mut_ptr();
 
+        // Create epoll fd
+        let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if epoll_fd < 0 {
+            panic!(
+                "failed to create epoll {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Add stdin to epoll
+        let mut epoll_stdin = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: RUNLOOP_EPOLL_STDIN,
+        };
+        let ret = unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, 0, &mut epoll_stdin) };
+        if ret < 0 {
+            panic!(
+                "failed to epoll stdin {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Set up connection to udev
+        let udev = udev_sys::UdevNetlinkSocket::new().expect("failed to connect to udev");
+
+        let mut epoll_udev = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: RUNLOOP_EPOLL_UDEV,
+        };
+        let ret =
+            unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, udev.fd, &mut epoll_udev) };
+        if ret < 0 {
+            panic!(
+                "failed to epoll udev socket {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Prepare buffer for reading events
+        let epoll_buf = Vec::with_capacity(2);
+
         // SAFETY: Make sure we set everything
         unsafe {
-            (*v).actual_needed_event_sz = Cell::new(/* todo */ 0);
+            (*v).epoll_fd = epoll_fd;
+            (*v).actual_needed_event_sz = Cell::new(epoll_buf.len());
             (*v).next_session_id = Cell::new(0);
             // SAFETY: Don't drop uninit objects
             // (but others are okay, no drop impl)
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
-
-            // SAFETY: Make sure we set everything
-            unsafe { Ok(this.init_ok()) }
+            ptr::addr_of_mut!((*v).epoll_buf).write(RefCell::new(epoll_buf));
+            ptr::addr_of_mut!((*v).udev_connection).write(udev);
         }
+
+        // SAFETY: Make sure we set everything
+        unsafe { Ok(this.init_ok()) }
     }
 
     pub fn init() -> impl pin_init::Init<Self, Infallible> {
@@ -1402,6 +1467,75 @@ impl USBStubEngine {
     #[cfg(target_os = "linux")]
     /// Run one loop. Returns true if we should continue
     pub fn run_loop(self: Pin<&Self>) -> bool {
+        // Poll for events
+        let mut epoll_buf = self.epoll_buf.borrow_mut();
+
+        dbg!("loop running");
+
+        // If we need to, grow the event buffer.
+        // We have to do the grow here, and *NOT* immediately when adding new things to watch,
+        // because new items get added while we are still iterating over the buffer.
+        let needed_events = self.actual_needed_event_sz.get();
+        if epoll_buf.capacity() < needed_events {
+            let to_reserve = needed_events - epoll_buf.len();
+            epoll_buf.reserve(to_reserve);
+        }
+
+        unsafe {
+            let nevents = libc::epoll_wait(
+                self.epoll_fd,
+                epoll_buf.as_mut_ptr(),
+                epoll_buf.capacity() as i32,
+                -1,
+            );
+
+            if nevents < 0 {
+                panic!("epoll failed: {:?}", std::io::Error::last_os_error());
+            }
+
+            // SAFETY: Set length to actual number of events
+            epoll_buf.set_len(nevents as usize);
+        };
+
+        for evt in epoll_buf.iter() {
+            match evt.u64 {
+                RUNLOOP_EPOLL_STDIN => {
+                    if evt.events & (libc::EPOLLIN as u32) != 0 {
+                        let cont = self.handle_stdin();
+                        if !cont {
+                            return false;
+                        }
+                    }
+                }
+                RUNLOOP_EPOLL_UDEV => loop {
+                    match self.udev_connection.get_event() {
+                        Ok(udev_evt) => {
+                            if let Some(udev_evt) = udev_evt {
+                                println!(
+                                    "{:?}",
+                                    udev_evt
+                                        .iter()
+                                        .map(|(k, v)| (
+                                            String::from_utf8_lossy(k),
+                                            v.as_deref().map(String::from_utf8_lossy)
+                                        ))
+                                        .collect::<HashMap<_, _>>()
+                                );
+                            } else {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("udev event reading failed {:?}", e);
+                        }
+                    }
+                },
+                _ => {
+                    log::warn!("Unknown epoll event {:?}", evt);
+                }
+            }
+        }
+
         true
     }
 
@@ -1672,23 +1806,6 @@ fn main() {
         .init()
         .unwrap();
     log::info!("awawausb stub starting!");
-
-    let udev = udev_sys::UdevNetlinkSocket::new().unwrap();
-    dbg!(&udev);
-    loop {
-        let evt = udev.get_event().unwrap();
-        if let Some(evt) = evt {
-            println!(
-                "{:?}",
-                evt.iter()
-                    .map(|(k, v)| (
-                        String::from_utf8_lossy(k),
-                        v.as_deref().map(String::from_utf8_lossy)
-                    ))
-                    .collect::<HashMap<_, _>>()
-            );
-        }
-    }
 
     pin_init::init_stack!(state = USBStubEngine::init());
     let state = state.unwrap();

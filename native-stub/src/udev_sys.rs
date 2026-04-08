@@ -118,7 +118,7 @@ impl UdevFeedCafeMessage {
         Ok(())
     }
 
-    pub fn properties(&self) -> impl Iterator<Item = UdevProperty> {
+    pub fn properties(&self) -> impl Iterator<Item = UdevProperty<'_>> {
         // Offset within what we have *declared as* `payload`
         let actual_payload_off =
             (self.hdr.properties_off as usize) - mem::size_of::<UdevFeedcafeMessageHeader>();
@@ -146,7 +146,7 @@ impl UdevFeedCafeMessage {
 
 #[derive(Debug)]
 pub struct UdevNetlinkSocket {
-    fd: i32,
+    pub fd: i32,
 }
 impl UdevNetlinkSocket {
     pub fn new() -> io::Result<Self> {
