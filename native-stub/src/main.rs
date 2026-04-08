@@ -11,6 +11,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub mod protocol;
 
+#[cfg(target_os = "linux")]
+mod udev_sys;
+
 #[cfg(target_os = "macos")]
 use kqueue_sys::*;
 
@@ -1661,6 +1664,12 @@ fn main() {
         .init()
         .unwrap();
     log::info!("awawausb stub starting!");
+
+    let udev = udev_sys::UdevNetlinkSocket::new().unwrap();
+    dbg!(&udev);
+    loop {
+        udev.get_event().unwrap();
+    }
 
     pin_init::init_stack!(state = USBStubEngine::init());
     let state = state.unwrap();
