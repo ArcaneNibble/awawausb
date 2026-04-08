@@ -487,6 +487,7 @@ pub const kIOUSBInterfaceInterfaceID197: CFUUIDBytes = CFUUIDBytes::new([
     0xC6, 0x3D, 0x3C, 0x92, 0x08, 0x84, 0x11, 0xD7, 0x96, 0x92, 0x00, 0x03, 0x93, 0x3E, 0x3E, 0x3E,
 ]);
 
+#[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     pub fn mach_msg(
         msg: *mut OpaqueMachMessage,
