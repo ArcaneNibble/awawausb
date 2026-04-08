@@ -8,19 +8,23 @@ use std::ptr;
 use std::rc::Rc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use core_foundation::base::CFRetain;
+
+pub mod protocol;
+
+#[cfg(target_os = "macos")]
 use kqueue_sys::*;
 
+#[cfg(target_os = "macos")]
 mod macos_sys;
-mod macos_wrap;
-pub mod protocol;
-mod stdio_unix;
-
+#[cfg(target_os = "macos")]
 use macos_sys::*;
+#[cfg(target_os = "macos")]
+mod macos_wrap;
+#[cfg(target_os = "macos")]
 use macos_wrap::*;
-use stdio_unix::*;
 
-use crate::protocol::DeviceConfiguration;
+mod stdio_unix;
+use stdio_unix::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum USBTransferDirection {
@@ -48,6 +52,7 @@ pub struct USBTransfer {
     /// given up ownership
     pub buf: Vec<u8>,
 
+    #[cfg(target_os = "macos")]
     _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 
@@ -59,7 +64,9 @@ pub struct USBTransferIsoc {
     pub buf: Vec<u8>,
     pub num_packets: usize,
 
+    #[cfg(target_os = "macos")]
     _macos_frames: Box<[IOUSBIsocFrame]>,
+    #[cfg(target_os = "macos")]
     _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
 }
 
@@ -69,7 +76,9 @@ pub struct USBInterfaceState {
     pub alt_setting: u8,
     pub claimed: bool,
 
+    #[cfg(target_os = "macos")]
     _macos_iface_idx: usize,
+    #[cfg(target_os = "macos")]
     /// For (reverse) mapping from endpoint address to pipeRef
     _macos_ep_addrs: Vec<u8>,
 }
@@ -86,7 +95,7 @@ pub struct USBDevice {
     pub product_name: Option<String>,
     pub serial_number: Option<String>,
 
-    pub reformatted_config_descriptors: Vec<DeviceConfiguration>,
+    pub reformatted_config_descriptors: Vec<protocol::DeviceConfiguration>,
     /// Map from bEndpointAddress to bInterfaceNumber
     ///
     /// Different interfaces cannot use the same endpoints
@@ -100,11 +109,15 @@ pub struct USBDevice {
     /// Map from endpoint address to (interface index, pipeRef)
     ///
     /// (macOS specific)
+    #[cfg(target_os = "macos")]
     _macos_ep_to_idx: HashMap<u8, (usize, u8)>,
+    #[cfg(target_os = "macos")]
     _macos_dev: IOUSBDeviceStruct,
+    #[cfg(target_os = "macos")]
     _macos_ifaces: Vec<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 impl USBDevice {
+    #[cfg(target_os = "macos")]
     #[allow(non_snake_case)]
     pub fn setup(obj: io_object_t, engine: Pin<&USBStubEngine>) -> Option<Self> {
         // These are available in IOKit, but not on the interface API.
@@ -312,6 +325,7 @@ impl USBDevice {
         self.ep_to_idx = ep_to_idx;
     }
 
+    #[cfg(target_os = "macos")]
     /// Open or re-open all interface handles, when switching configuration
     pub(crate) fn macos_probe_ifaces(
         &mut self,
@@ -390,15 +404,22 @@ pub struct USBStubEngine {
     // But we never make it smaller, so this field keeps track of
     // how many events we _actually_ need.
     actual_needed_event_sz: Cell<usize>,
+
+    #[cfg(target_os = "macos")]
     kqueue: i32,
+    #[cfg(target_os = "macos")]
     kevents_buf: RefCell<Vec<kevent>>,
     // The following only need to be held on to, we don't touch them
+    #[cfg(target_os = "macos")]
     _io_notification_port: *mut IONotificationPort,
+    #[cfg(target_os = "macos")]
     _plug_notifications: io_object_t,
+    #[cfg(target_os = "macos")]
     _unplug_notifications: io_object_t,
 }
 impl USBStubEngine {
     // XXX: Work around rustfmt not wanting to work otherwise??
+    #[cfg(target_os = "macos")]
     fn init_real(
         mut this: pin_init::PinUninit<'_, Self>,
     ) -> pin_init::InitResult<'_, Self, Infallible> {
@@ -455,7 +476,7 @@ impl USBStubEngine {
         // Register IOKit notifications
         let matching = unsafe { IOServiceMatching(b"IOUSBDevice\0".as_ptr()) };
         // SAFETY: We add two matching notifications, so bump refcount by 1
-        unsafe { CFRetain(matching as *const _) };
+        unsafe { core_foundation::base::CFRetain(matching as *const _) };
 
         let mut plug_notifications = io_object_t(0);
         let ret = unsafe {
@@ -504,6 +525,24 @@ impl USBStubEngine {
         unsafe { Ok(this.init_ok()) }
     }
 
+    #[cfg(target_os = "linux")]
+    fn init_real(
+        mut this: pin_init::PinUninit<'_, Self>,
+    ) -> pin_init::InitResult<'_, Self, Infallible> {
+        let v = this.get_mut().as_mut_ptr();
+
+        // SAFETY: Make sure we set everything
+        unsafe {
+            (*v).actual_needed_event_sz = Cell::new(/* todo */ 0);
+            // SAFETY: Don't drop uninit objects
+            // (but others are okay, no drop impl)
+            ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
+
+            // SAFETY: Make sure we set everything
+            unsafe { Ok(this.init_ok()) }
+        }
+    }
+
     pub fn init() -> impl pin_init::Init<Self, Infallible> {
         pin_init::init_from_closure(Self::init_real)
     }
@@ -547,6 +586,7 @@ impl USBStubEngine {
             };
         }
 
+        #[cfg(target_os = "macos")]
         match msg_parsed {
             protocol::RequestMessage::EchoTest { msg } => {
                 let reply = protocol::ResponseMessage::EchoResponse { msg };
@@ -1271,6 +1311,7 @@ impl USBStubEngine {
         true
     }
 
+    #[cfg(target_os = "macos")]
     /// Run one loop. Returns true if we should continue
     pub fn run_loop(self: Pin<&Self>) -> bool {
         // Poll for events
@@ -1347,6 +1388,13 @@ impl USBStubEngine {
         true
     }
 
+    #[cfg(target_os = "linux")]
+    /// Run one loop. Returns true if we should continue
+    pub fn run_loop(self: Pin<&Self>) -> bool {
+        true
+    }
+
+    #[cfg(target_os = "macos")]
     extern "C" fn iokit_plug_cb(self_: *const (), iterator: io_object_t) {
         // SAFETY: We passed in self as the arg, and we init as pinned
         let self_ = unsafe { Pin::new_unchecked(&*(self_ as *const Self)) };
@@ -1401,6 +1449,7 @@ impl USBStubEngine {
         }
     }
 
+    #[cfg(target_os = "macos")]
     extern "C" fn iokit_unplug_cb(self_: *const (), iterator: io_object_t) {
         // SAFETY: We passed in self as the arg, and we init as pinned
         let self_ = unsafe { Pin::new_unchecked(&*(self_ as *const Self)) };
@@ -1441,6 +1490,7 @@ impl USBStubEngine {
     /// Start watching a new Mach port
     ///
     /// Implicitly incrememnts actual_needed_event_sz
+    #[cfg(target_os = "macos")]
     pub(crate) fn add_mach_port(&self, mach_port: libc::mach_port_t) -> io::Result<()> {
         // Register the port in kqueue
         let kevent_new = kqueue_sys::kevent::new(
@@ -1462,6 +1512,7 @@ impl USBStubEngine {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     extern "C" fn iokit_usb_completion(
         refcon: *const (),
         result: libc::kern_return_t,
@@ -1523,6 +1574,7 @@ impl USBStubEngine {
         // n.b. the xfer will now be deallocated automagically
     }
 
+    #[cfg(target_os = "macos")]
     extern "C" fn iokit_usb_completion_isoc(
         refcon: *const (),
         result: libc::kern_return_t,
@@ -1593,6 +1645,7 @@ impl USBStubEngine {
 }
 impl Drop for USBStubEngine {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
         unsafe {
             IOObjectRelease(self._plug_notifications);
             IOObjectRelease(self._unplug_notifications);
