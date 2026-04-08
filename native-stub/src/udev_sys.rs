@@ -257,97 +257,129 @@ impl UdevNetlinkSocket {
         Ok(out)
     }
 
-    pub fn get_event(&self) -> io::Result<()> {
-        let pkt_sz = unsafe {
-            libc::recv(
-                self.fd,
-                ptr::null_mut(),
-                0,
-                libc::MSG_PEEK | libc::MSG_TRUNC,
-            )
-        };
-        if pkt_sz < 0 {
-            log::warn!("recv(peeking) failed on udev socket!");
-            return Err(io::Error::last_os_error());
+    /// Get a new udev event
+    ///
+    /// If this returns Some, that's the event (singular) we managed to get.
+    /// If this returns None, we have nothing more available now
+    /// (try again later after epoll?)
+    ///
+    /// It may be useful to wrap this in another loop externally to dequeue *all*
+    /// events which are currently available
+    pub fn get_event(&self) -> io::Result<Option<HashMap<Vec<u8>, Option<Vec<u8>>>>> {
+        loop {
+            let pkt_sz = unsafe {
+                libc::recv(
+                    self.fd,
+                    ptr::null_mut(),
+                    0,
+                    libc::MSG_PEEK | libc::MSG_TRUNC | libc::MSG_DONTWAIT,
+                )
+            };
+            if pkt_sz < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+
+                log::warn!("recv(peeking) failed on udev socket!");
+                return Err(err);
+            }
+            let pkt_sz = pkt_sz as usize;
+
+            let buf_layout =
+                Layout::from_size_align(pkt_sz, mem::align_of::<UdevFeedcafeMessageHeader>())
+                    .unwrap();
+            let buf = unsafe { std::alloc::alloc(buf_layout) };
+
+            // We use recvmsg, even though we (currently) don't receive creds,
+            // in order to make sure we didn't get a truncated message
+            // (is that even possible on this socket?)
+            let mut iov = libc::iovec {
+                iov_base: buf as *mut libc::c_void,
+                iov_len: pkt_sz,
+            };
+            let mut msg = unsafe { MaybeUninit::<libc::msghdr>::zeroed().assume_init() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            let sz2 = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
+            if sz2 < 0 || sz2 as usize != pkt_sz {
+                log::warn!("recv() failed on udev socket!");
+                return Err(io::Error::last_os_error());
+            }
+            if msg.msg_flags & libc::MSG_TRUNC != 0 {
+                log::warn!("recv() got a truncated message on udev socket!");
+                return Err(io::Error::last_os_error());
+            }
+            if pkt_sz < mem::size_of::<UdevFeedcafeMessageHeader>() {
+                log::warn!("recv packet way too small on udev socket!");
+                return Err(io::Error::from(io::ErrorKind::Other));
+            }
+
+            // XXX I don't understand why systemd needs to check the sender UID here.
+            // That seems unnecessary, since
+            // > Only processes with an effective UID of 0 or the CAP_NET_ADMIN capability
+            // > may send or listen to a netlink multicast group.
+            // Note^2: The latter doesn't apply here, since
+            // > Some Linux kernel subsystems may additionally allow other users
+            // > to send and/or receive messages. As at Linux 3.0, the NETLINK_KOBJECT_UEVENT, [...]
+            // > groups allow other users to receive messages.
+            //
+            // > **No groups allow other users to send messages.**
+
+            // Deal with received sizes
+            let payload_sz = pkt_sz - mem::size_of::<UdevFeedcafeMessageHeader>();
+            struct FatPointer {
+                ptr: *mut u8,
+                sz: usize,
+            }
+            let mut pkt: Box<UdevFeedCafeMessage> = unsafe {
+                mem::transmute(FatPointer {
+                    ptr: buf,
+                    sz: payload_sz,
+                })
+            };
+
+            // We perform these checks *even though* some of them are redundant with BPF
+            // (since we also don't hard-require BPF to work)
+            pkt.mangle_and_validate().map_err(|_| {
+                log::warn!("got a malformed udev packet!");
+                io::Error::from(io::ErrorKind::Other)
+            })?;
+            if pkt.hdr.subsystem_hash != murmur_hash_2(b"usb", 0)
+                || pkt.hdr.devtype_hash != murmur_hash_2(b"usb_device", 0)
+            {
+                continue;
+            }
+            let props = pkt
+                .properties()
+                .map(|x| (x.key.to_owned(), x.val.map(|x| x.to_owned())))
+                .collect::<HashMap<_, _>>();
+            if let Some(Some(subsystem)) = props.get(b"SUBSYSTEM".as_slice()) {
+                if subsystem != b"usb" {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if let Some(Some(devtype)) = props.get(b"DEVTYPE".as_slice()) {
+                if devtype != b"usb_device" {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            // We are hardcoded to look for "add" actions
+            if let Some(Some(action)) = props.get(b"ACTION".as_slice()) {
+                if action != b"add" {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            return Ok(Some(props));
         }
-        let pkt_sz = pkt_sz as usize;
-
-        // let mut buf = Vec::<u8>::with_capacity(pkt_sz as usize);
-        let buf_layout =
-            Layout::from_size_align(pkt_sz, mem::align_of::<UdevFeedcafeMessageHeader>()).unwrap();
-        let buf = unsafe { std::alloc::alloc(buf_layout) };
-
-        // We use recvmsg, even though we (currently) don't receive creds,
-        // in order to make sure we didn't get a truncated message
-        // (is that even possible on this socket?)
-        let mut iov = libc::iovec {
-            iov_base: buf as *mut libc::c_void,
-            iov_len: pkt_sz,
-        };
-        let mut msg = unsafe { MaybeUninit::<libc::msghdr>::zeroed().assume_init() };
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        let sz2 = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
-        if sz2 < 0 || sz2 as usize != pkt_sz {
-            log::warn!("recv() failed on udev socket!");
-            return Err(io::Error::last_os_error());
-        }
-        if pkt_sz < mem::size_of::<UdevFeedcafeMessageHeader>() {
-            log::warn!("recv packet way too small on udev socket!");
-            return Err(io::Error::from(io::ErrorKind::Other));
-        }
-
-        // XXX I don't understand why systemd needs to check the sender UID here.
-        // That seems unnecessary, since
-        // > Only processes with an effective UID of 0 or the CAP_NET_ADMIN capability
-        // > may send or listen to a netlink multicast group.
-        // Note^2: The latter doesn't apply here, since
-        // > Some Linux kernel subsystems may additionally allow other users
-        // > to send and/or receive messages. As at Linux 3.0, the NETLINK_KOBJECT_UEVENT, [...]
-        // > groups allow other users to receive messages.
-        //
-        // > **No groups allow other users to send messages.**
-
-        // Deal with received sizes
-        let payload_sz = pkt_sz - mem::size_of::<UdevFeedcafeMessageHeader>();
-        struct FatPointer {
-            ptr: *mut u8,
-            sz: usize,
-        }
-        let mut pkt: Box<UdevFeedCafeMessage> = unsafe {
-            mem::transmute(FatPointer {
-                ptr: buf,
-                sz: payload_sz,
-            })
-        };
-        // We perform these checks *even though* some of them are redundant with BPF
-        // (since we also don't hard-require BPF to work)
-        pkt.mangle_and_validate().map_err(|_| {
-            log::warn!("got a malformed udev packet!");
-            io::Error::from(io::ErrorKind::Other)
-        })?;
-        if pkt.hdr.subsystem_hash != murmur_hash_2(b"usb", 0)
-            || pkt.hdr.devtype_hash != murmur_hash_2(b"usb_device", 0)
-        {
-            // TODO: continue
-            return Ok(());
-        }
-        let props = pkt
-            .properties()
-            .map(|x| (x.key, x.val))
-            .collect::<HashMap<_, _>>();
-        println!(
-            "{:?}",
-            props
-                .iter()
-                .map(|(k, v)| (String::from_utf8_lossy(k), v.map(String::from_utf8_lossy)))
-                .collect::<HashMap<_, _>>()
-        );
-
-        // TODO
-
-        // todo
-        Ok(())
     }
 }
 impl Drop for UdevNetlinkSocket {

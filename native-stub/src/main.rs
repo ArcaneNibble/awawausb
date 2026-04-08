@@ -406,7 +406,14 @@ pub struct USBStubEngine {
     // As we watch more things, we make the event buffer bigger.
     // But we never make it smaller, so this field keeps track of
     // how many events we _actually_ need.
+    //
+    // This is used by both epoll (Linux) and kqueue (macOS)
     actual_needed_event_sz: Cell<usize>,
+
+    /// Number which will be incremented to uniquely identify devices,
+    /// since Linux has no better way to do that
+    #[cfg(target_os = "linux")]
+    next_session_id: Cell<u64>,
 
     #[cfg(target_os = "macos")]
     kqueue: i32,
@@ -537,6 +544,7 @@ impl USBStubEngine {
         // SAFETY: Make sure we set everything
         unsafe {
             (*v).actual_needed_event_sz = Cell::new(/* todo */ 0);
+            (*v).next_session_id = Cell::new(0);
             // SAFETY: Don't drop uninit objects
             // (but others are okay, no drop impl)
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
@@ -1668,7 +1676,18 @@ fn main() {
     let udev = udev_sys::UdevNetlinkSocket::new().unwrap();
     dbg!(&udev);
     loop {
-        udev.get_event().unwrap();
+        let evt = udev.get_event().unwrap();
+        if let Some(evt) = evt {
+            println!(
+                "{:?}",
+                evt.iter()
+                    .map(|(k, v)| (
+                        String::from_utf8_lossy(k),
+                        v.as_deref().map(String::from_utf8_lossy)
+                    ))
+                    .collect::<HashMap<_, _>>()
+            );
+        }
     }
 
     pin_init::init_stack!(state = USBStubEngine::init());
