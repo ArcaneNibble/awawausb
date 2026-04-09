@@ -144,7 +144,137 @@ impl USBDevice {
         write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
     }
 
-    #[cfg(target_os = "linux")]
+    pub(crate) fn reformat_config_descriptors(&mut self) {
+        let mut ep_to_idx = HashMap::new();
+        let mut configs = Vec::new();
+        for cfg_desc in &self.config_descriptors {
+            let mut this_config_desc = None;
+            for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
+                match desc {
+                    usb_ch9::DescriptorRef::Config(d) => {
+                        if this_config_desc.is_some() {
+                            #[cfg(target_os = "macos")]
+                            {
+                                // On macOS, we get individual descriptors per config
+                                log::warn!("Bogus extra configuration descriptor? {:?}", desc)
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                // On Linux, we just get everything concatenated,
+                                // so start a new configuration now
+                                configs.push(this_config_desc.take().unwrap());
+                                this_config_desc = Some(protocol::DeviceConfiguration {
+                                    bConfigurationValue: d.bConfigurationValue,
+                                    iConfiguration: d.iConfiguration,
+                                    interfaces: Vec::new(),
+                                });
+                            }
+                        } else {
+                            this_config_desc = Some(protocol::DeviceConfiguration {
+                                bConfigurationValue: d.bConfigurationValue,
+                                iConfiguration: d.iConfiguration,
+                                interfaces: Vec::new(),
+                            });
+                        }
+                    }
+                    usb_ch9::DescriptorRef::Interface(d) => {
+                        if let Some(this_config_desc) = &mut this_config_desc {
+                            let current_alt_setting = if this_config_desc.bConfigurationValue
+                                == self.current_configuration_id
+                            {
+                                let current_if_state =
+                                    self.current_if_state.get(&d.bInterfaceNumber);
+                                match current_if_state {
+                                    Some(x) => x.alt_setting,
+                                    None => {
+                                        log::warn!(
+                                            "Descriptor has an interface 0x{:02x} we don't know about",
+                                            d.bInterfaceNumber
+                                        );
+                                        0
+                                    }
+                                }
+                            } else {
+                                // If the configuration isn't active, default the alt setting to 0
+                                0
+                            };
+
+                            this_config_desc.interfaces.push(protocol::DeviceInterface {
+                                bInterfaceNumber: d.bInterfaceNumber,
+                                bAlternateSetting: d.bAlternateSetting,
+                                bInterfaceClass: d.bInterfaceClass,
+                                bInterfaceSubClass: d.bInterfaceSubClass,
+                                bInterfaceProtocol: d.bInterfaceProtocol,
+                                iInterface: d.iInterface,
+
+                                current_alt_setting,
+                                endpoints: Vec::new(),
+                            });
+                        } else {
+                            log::warn!(
+                                "Bogus interface descriptor without config descriptor? {:?}",
+                                desc
+                            )
+                        }
+                    }
+                    usb_ch9::DescriptorRef::Endpoint(d) => {
+                        if let Some(this_config_desc) = &mut this_config_desc {
+                            if let Some(last_iface) = this_config_desc.interfaces.iter_mut().last()
+                            {
+                                let old_iface = ep_to_idx
+                                    .insert(d.bEndpointAddress, last_iface.bInterfaceNumber);
+                                if let Some(old_iface) = old_iface {
+                                    if old_iface != last_iface.bInterfaceNumber {
+                                        log::warn!(
+                                            "Endpoints incorrectly duplicated across interfaces? ep 0x{:02x} in iface 0x{:02x}",
+                                            d.bEndpointAddress,
+                                            last_iface.bInterfaceNumber
+                                        );
+                                    }
+                                }
+
+                                last_iface.endpoints.push(protocol::DeviceEndpoint {
+                                    bEndpointAddress: d.bEndpointAddress,
+                                    bmAttributes: d.bmAttributes,
+                                    wMaxPacketSize: d.wMaxPacketSize,
+                                });
+                            } else {
+                                log::warn!(
+                                    "Bogus endpoint descriptor without interface descriptor? {:?}",
+                                    desc
+                                )
+                            }
+                        } else {
+                            log::warn!(
+                                "Bogus endpoint descriptor without config descriptor? {:?}",
+                                desc
+                            )
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if this_config_desc.is_none() {
+                log::warn!("Bogus configuration descriptor??");
+                // Put a dummy value in
+                this_config_desc = Some(protocol::DeviceConfiguration {
+                    bConfigurationValue: 0,
+                    iConfiguration: 0,
+                    interfaces: Vec::new(),
+                });
+            }
+
+            configs.push(this_config_desc.unwrap());
+        }
+
+        self.reformatted_config_descriptors = configs;
+        self.ep_to_idx = ep_to_idx;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl USBDevice {
     pub fn setup(
         dev_usb_path: &Path,
         sysfs_dev_path: Option<&Path>,
@@ -275,140 +405,90 @@ impl USBDevice {
         Ok(())
     }
 
-    pub(crate) fn reformat_config_descriptors(&mut self) {
-        let mut ep_to_idx = HashMap::new();
-        let mut configs = Vec::new();
-        for cfg_desc in &self.config_descriptors {
-            let mut this_config_desc = None;
-            for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
-                match desc {
-                    usb_ch9::DescriptorRef::Config(d) => {
-                        if this_config_desc.is_some() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                // On macOS, we get individual descriptors per config
-                                log::warn!("Bogus extra configuration descriptor? {:?}", desc)
-                            }
-                            #[cfg(target_os = "linux")]
-                            {
-                                // On Linux, we just get everything concatenated,
-                                // so start a new configuration now
-                                configs.push(this_config_desc.take().unwrap());
-                                this_config_desc = Some(protocol::DeviceConfiguration {
-                                    bConfigurationValue: d.bConfigurationValue,
-                                    iConfiguration: d.iConfiguration,
-                                    interfaces: Vec::new(),
-                                });
-                            }
-                        } else {
-                            this_config_desc = Some(protocol::DeviceConfiguration {
-                                bConfigurationValue: d.bConfigurationValue,
-                                iConfiguration: d.iConfiguration,
-                                interfaces: Vec::new(),
-                            });
-                        }
-                    }
-                    usb_ch9::DescriptorRef::Interface(d) => {
-                        if let Some(this_config_desc) = &mut this_config_desc {
-                            let current_alt_setting = if this_config_desc.bConfigurationValue
-                                == self.current_configuration_id
-                            {
-                                let current_if_state =
-                                    self.current_if_state.get(&d.bInterfaceNumber);
-                                match current_if_state {
-                                    Some(x) => x.alt_setting,
-                                    None => {
-                                        log::warn!(
-                                            "Descriptor has an interface 0x{:02x} we don't know about",
-                                            d.bInterfaceNumber
-                                        );
-                                        0
-                                    }
-                                }
-                            } else {
-                                // If the configuration isn't active, default the alt setting to 0
-                                0
-                            };
-
-                            this_config_desc.interfaces.push(protocol::DeviceInterface {
-                                bInterfaceNumber: d.bInterfaceNumber,
-                                bAlternateSetting: d.bAlternateSetting,
-                                bInterfaceClass: d.bInterfaceClass,
-                                bInterfaceSubClass: d.bInterfaceSubClass,
-                                bInterfaceProtocol: d.bInterfaceProtocol,
-                                iInterface: d.iInterface,
-
-                                current_alt_setting,
-                                endpoints: Vec::new(),
-                            });
-                        } else {
-                            log::warn!(
-                                "Bogus interface descriptor without config descriptor? {:?}",
-                                desc
-                            )
-                        }
-                    }
-                    usb_ch9::DescriptorRef::Endpoint(d) => {
-                        if let Some(this_config_desc) = &mut this_config_desc {
-                            if let Some(last_iface) = this_config_desc.interfaces.iter_mut().last()
-                            {
-                                let old_iface = ep_to_idx
-                                    .insert(d.bEndpointAddress, last_iface.bInterfaceNumber);
-                                if let Some(old_iface) = old_iface {
-                                    if old_iface != last_iface.bInterfaceNumber {
-                                        log::warn!(
-                                            "Endpoints incorrectly duplicated across interfaces? ep 0x{:02x} in iface 0x{:02x}",
-                                            d.bEndpointAddress,
-                                            last_iface.bInterfaceNumber
-                                        );
-                                    }
-                                }
-
-                                last_iface.endpoints.push(protocol::DeviceEndpoint {
-                                    bEndpointAddress: d.bEndpointAddress,
-                                    bmAttributes: d.bmAttributes,
-                                    wMaxPacketSize: d.wMaxPacketSize,
-                                });
-                            } else {
-                                log::warn!(
-                                    "Bogus endpoint descriptor without interface descriptor? {:?}",
-                                    desc
-                                )
-                            }
-                        } else {
-                            log::warn!(
-                                "Bogus endpoint descriptor without config descriptor? {:?}",
-                                desc
-                            )
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            if this_config_desc.is_none() {
-                log::warn!("Bogus configuration descriptor??");
-                // Put a dummy value in
-                this_config_desc = Some(protocol::DeviceConfiguration {
-                    bConfigurationValue: 0,
-                    iConfiguration: 0,
-                    interfaces: Vec::new(),
-                });
-            }
-
-            configs.push(this_config_desc.unwrap());
-        }
-
-        self.reformatted_config_descriptors = configs;
-        self.ep_to_idx = ep_to_idx;
-    }
-
-    #[cfg(target_os = "linux")]
     // Re-determine active interface alt settings
     fn linux_probe_ifaces(&mut self) -> io::Result<()> {
         let linux_dev = self._linux_handles.borrow_mut();
         self.current_if_state = linux_dev.reprobe_ifaces()?;
         Ok(())
+    }
+
+    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn set_configuration(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        value: u8,
+        engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn ctrl_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        len: u16,
+        buf: Vec<u8>,
+        timeout: u64,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn data_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        len: u32,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn isoc_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        total_len: usize,
+        pkt_len: Vec<u32>,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        todo!()
     }
 }
 
@@ -1352,7 +1432,6 @@ impl USBStubEngine {
             serde_json::from_str(&msg).expect("failed to parse message as JSON");
         let txn_id = msg_parsed.txn_id().to_owned();
 
-        #[cfg(target_os = "macos")]
         match self.handle_message(msg_parsed) {
             Ok(DeviceOpResult::SendCompletionNow) => {
                 let reply = protocol::ResponseMessage::RequestComplete {
@@ -1381,7 +1460,6 @@ impl USBStubEngine {
         true
     }
 
-    #[cfg(target_os = "macos")]
     fn handle_message(self: Pin<&Self>, msg_parsed: protocol::RequestMessage) -> DeviceResult {
         match msg_parsed {
             protocol::RequestMessage::OpenDevice { sid, txn_id } => {
