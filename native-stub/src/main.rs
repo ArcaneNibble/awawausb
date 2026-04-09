@@ -324,6 +324,8 @@ impl USBDevice {
         }
         linux_dev.sysfs_fd = sysfs_dirfd;
 
+        // Our device handles are all set up now
+
         // Get all descriptors
         let all_descriptors = read_entire_sysfs_file(sysfs_dirfd, c"descriptors")?;
         if all_descriptors.is_none() {
@@ -594,15 +596,14 @@ impl USBDevice {
 }
 
 #[cfg(target_os = "linux")]
-const RUNLOOP_EPOLL_STDIN: u64 = 0;
+const RUNLOOP_EPOLL_STDIN: u64 = -1i64 as u64;
 #[cfg(target_os = "linux")]
-const RUNLOOP_EPOLL_UDEV: u64 = 1;
-#[cfg(target_os = "linux")]
-const RUNLOOP_EPOLL_USB: u64 = 2;
+const RUNLOOP_EPOLL_UDEV: u64 = -2i64 as u64;
 
 /// Main struct holding all of the state for our operations
 #[derive(Debug)]
 pub struct USBStubEngine {
+    /// Map from session IDs to devices
     usb_devices: RefCell<HashMap<u64, USBDevice>>,
 
     // As we watch more things, we make the event buffer bigger.
@@ -1733,10 +1734,28 @@ impl USBStubEngine {
                                 );
 
                                 match USBDevice::setup(dev_usb_path, Some(&sysfs_path), self) {
-                                    Ok(usb_dev) => {
+                                    Ok(mut usb_dev) => {
                                         let sessionid = self.next_session_id.get();
                                         self.next_session_id.set(sessionid + 1);
-                                        usb_dev.send_plug_notification(sessionid, self);
+
+                                        // Only _here_ can we add the device to epoll
+                                        // FIXME: This lifetime management is all confusing *and* duplicated
+                                        match self
+                                            .add_usb_fd(usb_dev._linux_handles.dev_fd, sessionid)
+                                        {
+                                            Ok(_) => {
+                                                usb_dev._linux_handles.decr_event_count =
+                                                    &self.actual_needed_event_sz;
+
+                                                usb_dev.send_plug_notification(sessionid, self);
+                                            }
+                                            Err(err) => {
+                                                log::warn!(
+                                                    "Device setup failed at epoll! err = {}",
+                                                    err
+                                                );
+                                            }
+                                        }
                                     }
                                     Err(err) => {
                                         log::warn!("Device setup failed! err = {}", err);
@@ -1752,12 +1771,52 @@ impl USBStubEngine {
                     }
                 },
                 _ => {
-                    log::warn!("Unknown epoll event {:?}", evt);
+                    if evt.events & (libc::EPOLLHUP as u32) != 0 {
+                        // Device is unplugged
+                        let sessionid = evt.u64;
+                        log::debug!("unplug sid {}", sessionid);
+
+                        let mut devices = self.usb_devices.borrow_mut();
+                        let dev = devices.remove(&sessionid);
+                        if dev.is_none() {
+                            log::warn!("Removing a sessionID we don't have?? 0x{:x}", sessionid);
+                        }
+                        drop(dev);
+
+                        // Send notification
+                        let notif = protocol::ResponseMessage::UnplugDevice {
+                            sid: sessionid.to_string(),
+                        };
+                        let notif = serde_json::to_string(&notif).unwrap();
+                        write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                    }
                 }
             }
         }
 
         true
+    }
+
+    /// Start watching a new usbdevfs fd
+    ///
+    /// Implicitly incrememnts actual_needed_event_sz
+    #[cfg(target_os = "linux")]
+    pub(crate) fn add_usb_fd(&self, fd: i32, sid: u64) -> io::Result<()> {
+        // Register the port in epoll
+        let mut epoll_usb = libc::epoll_event {
+            events: libc::EPOLLOUT as u32,
+            u64: sid,
+        };
+        let ret =
+            unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut epoll_usb) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // Bump the buffer size
+        self.actual_needed_event_sz.update(|x| x + 1);
+
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2060,13 +2119,28 @@ fn main() {
                             full_path.push(OsStr::from_bytes(dirname_bus.to_bytes()));
                             full_path.push(OsStr::from_bytes(dirname_dev.to_bytes()));
 
-                            dbg!(&full_path);
-
                             match USBDevice::setup(&full_path, None, state) {
-                                Ok(usb_dev) => {
+                                Ok(mut usb_dev) => {
                                     let sessionid = state.next_session_id.get();
                                     state.next_session_id.set(sessionid + 1);
-                                    usb_dev.send_plug_notification(sessionid, state);
+
+                                    // Only _here_ can we add the device to epoll
+                                    // FIXME: This lifetime management is all confusing
+                                    match state.add_usb_fd(usb_dev._linux_handles.dev_fd, sessionid)
+                                    {
+                                        Ok(_) => {
+                                            usb_dev._linux_handles.decr_event_count =
+                                                &state.actual_needed_event_sz;
+
+                                            usb_dev.send_plug_notification(sessionid, state);
+                                        }
+                                        Err(err) => {
+                                            log::warn!(
+                                                "Device setup failed at epoll! err = {}",
+                                                err
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(err) => {
                                     log::warn!("Device setup failed! err = {}", err);
