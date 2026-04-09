@@ -522,7 +522,7 @@ mod tests {
                 core::mem::size_of_val(&TEST),
             )
         };
-        let (test_ptr_2, test_left) = StringDescriptor::from_bytes(test_as_bytes);
+        let (test_ptr_2, test_left) = StringDescriptor::from_bytes(test_as_bytes).unwrap();
         assert_eq!(test_left.len(), 0);
         let parsed = test_ptr_2
             .payload()
