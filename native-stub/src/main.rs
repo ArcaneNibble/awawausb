@@ -146,8 +146,9 @@ impl USBDevice {
     #[allow(non_snake_case)]
     pub fn setup(
         obj: io_object_t,
+        sessionid: u64,
         engine: Pin<&USBStubEngine>,
-    ) -> Result<Self, libc::kern_return_t> {
+    ) -> Result<(), libc::kern_return_t> {
         // These are available in IOKit, but not on the interface API.
         // None of these gets (here or below) should ever fail on versions of macOS we support
         // (but, as a hack, we ignore failures here to avoid leaking the object).
@@ -237,7 +238,10 @@ impl USBDevice {
         dev.macos_probe_ifaces(engine)?;
         dev.reformat_config_descriptors();
 
-        Ok(dev)
+        // At the *very* end, we can send this
+        dev.send_plug_notification(sessionid, engine);
+
+        Ok(())
     }
 
     /// Send a device plug-in notification, while also stashing ourselves into the engine
@@ -1836,17 +1840,12 @@ impl USBStubEngine {
             if let Some(sessionid) = sessionid {
                 log::debug!("plug, session = 0x{:x}", sessionid);
 
-                match USBDevice::setup(item, self_) {
-                    Ok(usb_dev) => {
-                        usb_dev.send_plug_notification(sessionid, self_);
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "Device setup failed! session = 0x{:x}, err = 0x{:08x}",
-                            sessionid,
-                            err as u32
-                        );
-                    }
+                if let Err(err) = USBDevice::setup(item, sessionid, self_) {
+                    log::warn!(
+                        "Device setup failed! session = 0x{:x}, err = 0x{:08x}",
+                        sessionid,
+                        err as u32
+                    );
                 }
             } else {
                 log::warn!("Got plug notification without a sessionID??");
