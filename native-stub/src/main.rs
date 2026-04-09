@@ -1,16 +1,28 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::Infallible;
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsStr};
 use std::io;
 use std::mem;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr;
 use std::rc::Rc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(target_os = "linux")]
+use usb_ch9::USBDescriptor;
 
 pub mod protocol;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::*;
 #[cfg(target_os = "linux")]
 mod udev_sys;
 #[cfg(target_os = "linux")]
@@ -220,8 +232,99 @@ impl USBDevice {
         Ok(dev)
     }
 
-    // #[cfg(target_os = "linux")]
-    // pub fn setup() ->
+    #[cfg(target_os = "linux")]
+    pub fn setup(
+        dev_usb_path: &Path,
+        sysfs_dev_path: &Path,
+        engine: Pin<&USBStubEngine>,
+    ) -> io::Result<Self> {
+        let dev_fd = unsafe {
+            libc::open(
+                CString::new(dev_usb_path.as_os_str().as_bytes())
+                    .unwrap()
+                    .as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC,
+            )
+        };
+        if dev_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        dbg!(dev_fd);
+
+        let sysfs_dirfd = unsafe {
+            libc::open(
+                CString::new(sysfs_dev_path.as_os_str().as_bytes())
+                    .unwrap()
+                    .as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if sysfs_dirfd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        dbg!(sysfs_dirfd);
+
+        // Get all descriptors
+        let all_descriptors = read_entire_sysfs_file(sysfs_dirfd, c"descriptors")?;
+        if all_descriptors.is_none() {
+            log::warn!(
+                "Skipping device for which we could not get descriptors {}",
+                dev_usb_path.to_string_lossy()
+            );
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let all_descriptors = all_descriptors.unwrap();
+        dbg!(&all_descriptors);
+        let (dev_desc, config_descs) = if let Some((dev_desc, config_descs)) =
+            usb_ch9::ch9_core::DeviceDescriptor::from_bytes(&all_descriptors)
+        {
+            dbg!(dev_desc, config_descs);
+            (dev_desc, config_descs)
+        } else {
+            log::warn!(
+                "Skipping device for which we could not get a device descriptor {}",
+                dev_usb_path.to_string_lossy()
+            );
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        };
+
+        // Get extra data
+        let manufacturer = read_entire_sysfs_file(sysfs_dirfd, c"manufacturer")?;
+        let manufacturer = manufacturer.map(|x| String::from_utf8_lossy(&x).to_string());
+        let product = read_entire_sysfs_file(sysfs_dirfd, c"product")?;
+        let product = product.map(|x| String::from_utf8_lossy(&x).to_string());
+        let serial = read_entire_sysfs_file(sysfs_dirfd, c"serial")?;
+        let serial = serial.map(|x| String::from_utf8_lossy(&x).to_string());
+
+        // Just try to get the current config, goddamit
+        let current_config =
+            read_entire_sysfs_file(sysfs_dirfd, c"bConfigurationValue")?.unwrap_or_default();
+        let current_config = str::from_utf8(&current_config).unwrap_or_default();
+        let current_config = str::parse::<u8>(current_config).unwrap_or_default();
+
+        // TODO: Probe interfaces state
+
+        let mut dev = USBDevice {
+            device_descriptor: *dev_desc,
+            // As a hack, we just store one single entry containing all descriptors
+            config_descriptors: vec![config_descs.to_vec()],
+            vendor_name: manufacturer,
+            product_name: product,
+            serial_number: serial,
+
+            reformatted_config_descriptors: Vec::new(),
+            ep_to_idx: HashMap::new(),
+
+            opened: false,
+            current_configuration_id: current_config,
+            current_if_state: HashMap::new(),
+        };
+
+        dev.reformat_config_descriptors();
+        dbg!(&dev);
+
+        Ok(dev)
+    }
 
     pub(crate) fn reformat_config_descriptors(&mut self) {
         let mut ep_to_idx = HashMap::new();
@@ -232,7 +335,22 @@ impl USBDevice {
                 match desc {
                     usb_ch9::DescriptorRef::Config(d) => {
                         if this_config_desc.is_some() {
-                            log::warn!("Bogus extra configuration descriptor? {:?}", desc)
+                            #[cfg(target_os = "macos")]
+                            {
+                                // On macOS, we get individual descriptors per config
+                                log::warn!("Bogus extra configuration descriptor? {:?}", desc)
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                // On Linux, we just get everything concatenated,
+                                // so start a new configuration now
+                                configs.push(this_config_desc.take().unwrap());
+                                this_config_desc = Some(protocol::DeviceConfiguration {
+                                    bConfigurationValue: d.bConfigurationValue,
+                                    iConfiguration: d.iConfiguration,
+                                    interfaces: Vec::new(),
+                                });
+                            }
                         } else {
                             this_config_desc = Some(protocol::DeviceConfiguration {
                                 bConfigurationValue: d.bConfigurationValue,
@@ -1517,16 +1635,40 @@ impl USBStubEngine {
                     match self.udev_connection.get_event() {
                         Ok(udev_evt) => {
                             if let Some(udev_evt) = udev_evt {
-                                println!(
-                                    "{:?}",
-                                    udev_evt
-                                        .iter()
-                                        .map(|(k, v)| (
-                                            String::from_utf8_lossy(k),
-                                            v.as_deref().map(String::from_utf8_lossy)
-                                        ))
-                                        .collect::<HashMap<_, _>>()
+                                let dev_usb_path = if let Some(Some(devname)) =
+                                    udev_evt.get(b"DEVNAME".as_slice())
+                                {
+                                    Path::new(OsStr::from_bytes(devname))
+                                } else {
+                                    log::warn!("udev event without DEVNAME");
+                                    break;
+                                };
+
+                                let mut sysfs_path = PathBuf::new();
+                                sysfs_path.push("/sys");
+                                if let Some(Some(devpath)) = udev_evt.get(b"DEVPATH".as_slice()) {
+                                    sysfs_path.push(if devpath.starts_with(b"/") {
+                                        OsStr::from_bytes(&devpath[1..])
+                                    } else {
+                                        OsStr::from_bytes(devpath)
+                                    });
+                                } else {
+                                    log::warn!("udev event without DEVPATH");
+                                    break;
+                                };
+
+                                log::debug!(
+                                    "plug, {} sysfs {}",
+                                    dev_usb_path.to_string_lossy(),
+                                    sysfs_path.to_string_lossy()
                                 );
+
+                                match USBDevice::setup(dev_usb_path, &sysfs_path, self) {
+                                    Ok(usb_dev) => todo!(),
+                                    Err(err) => {
+                                        log::warn!("Device setup failed! err = {}", err);
+                                    }
+                                }
                             } else {
                                 break;
                             }
