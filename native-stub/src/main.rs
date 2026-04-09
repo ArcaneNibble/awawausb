@@ -271,6 +271,14 @@ impl USBDevice {
         self.reformatted_config_descriptors = configs;
         self.ep_to_idx = ep_to_idx;
     }
+
+    fn _check_open(&self) -> Result<(), protocol::Errors> {
+        if !self.opened {
+            Err(protocol::Errors::InvalidState)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -374,6 +382,27 @@ impl USBDevice {
         engine.add_usb_fd(dev_fd, sessionid)?;
         linux_dev.decr_event_count = &engine.actual_needed_event_sz;
 
+        // Check capabilities and warn if we don't like them
+        if !engine._printed_caps_warning.get() {
+            match linux_dev.get_capabilities() {
+                Ok(caps) => {
+                    let wanted_caps =
+                        USBDEVFS_CAP_NO_PACKET_SIZE_LIM | USBDEVFS_CAP_REAP_AFTER_DISCONNECT;
+                    if caps & wanted_caps != wanted_caps {
+                        log::warn!("Your kernel doesn't support important USBDEVFS features!");
+                        engine._printed_caps_warning.set(true);
+                    }
+                }
+                Err(e) => {
+                    if e.raw_os_error() == Some(libc::ENOTTY) {
+                        log::warn!("Your kernel is _very_ old, expect features to be unreliable!");
+                    }
+                    log::warn!("Getting USBDEVFS capabilities failed! {}", e);
+                    engine._printed_caps_warning.set(true);
+                }
+            }
+        }
+
         let mut dev = USBDevice {
             device_descriptor: *dev_desc,
             // As a hack, we just store one single entry containing all descriptors
@@ -413,14 +442,24 @@ impl USBDevice {
     }
 
     fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
-        todo!()
+        log::debug!("device open (dummy), sid = {}, txn = {}", sid, txn_id);
+        // In Linux, we effectively don't have to do anything to open/close the device
+        // By the time we "detect" the device, we already have it open
+        //
+        // We *do* still track a virtual open state though
+        self.opened = true;
+        Ok(DeviceOpResult::SendCompletionNow)
     }
 
     fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        self._check_open()?;
+
+        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
         todo!()
     }
 
     fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
@@ -431,18 +470,22 @@ impl USBDevice {
         value: u8,
         engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
     fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
     fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
     fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
@@ -459,6 +502,7 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
@@ -471,10 +515,12 @@ impl USBDevice {
         len: u32,
         buf: Vec<u8>,
     ) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
     fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 
@@ -488,6 +534,7 @@ impl USBDevice {
         pkt_len: Vec<u32>,
         buf: Vec<u8>,
     ) -> DeviceResult {
+        self._check_open()?;
         todo!()
     }
 }
@@ -690,14 +737,6 @@ impl USBDevice {
                 self.opened = true;
                 Ok(DeviceOpResult::SendCompletionNow)
             }
-        }
-    }
-
-    fn _check_open(&self) -> Result<(), protocol::Errors> {
-        if !self.opened {
-            Err(protocol::Errors::InvalidState)
-        } else {
-            Ok(())
         }
     }
 
@@ -1223,6 +1262,8 @@ pub struct USBStubEngine {
     epoll_buf: RefCell<Vec<libc::epoll_event>>,
     #[cfg(target_os = "linux")]
     udev_connection: UdevNetlinkSocket,
+    #[cfg(target_os = "linux")]
+    _printed_caps_warning: Cell<bool>,
 
     #[cfg(target_os = "macos")]
     kqueue: i32,
@@ -1402,6 +1443,7 @@ impl USBStubEngine {
             (*v).epoll_fd = epoll_fd;
             (*v).actual_needed_event_sz = Cell::new(epoll_buf.len());
             (*v).next_session_id = Cell::new(0);
+            (*v)._printed_caps_warning = Cell::new(false);
             // SAFETY: Don't drop uninit objects
             // (but others are okay, no drop impl)
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
