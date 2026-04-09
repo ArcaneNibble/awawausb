@@ -124,9 +124,12 @@ pub struct USBDevice {
     pub current_if_state: HashMap<u8, USBInterfaceState>,
 
     /// Linux-specific state
-    /// TODO: Drop this properly
+    ///
+    /// Note: we *also* need Rc<RefCell<>> in order to handle older kernels
+    /// where HUP and ERR are delivered at the same time, making it so that
+    /// URBs which are not ready to reap yet will get lost.
     #[cfg(target_os = "linux")]
-    _linux_handles: LinuxHandles,
+    _linux_handles: Rc<RefCell<LinuxHandles>>,
 
     /// Map from endpoint address to (interface index, pipeRef)
     ///
@@ -273,7 +276,7 @@ impl USBDevice {
         dev_usb_path: &Path,
         sysfs_dev_path: Option<&Path>,
         engine: Pin<&USBStubEngine>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<()> {
         let mut linux_dev = LinuxHandles::new();
 
         let dev_fd = unsafe {
@@ -362,6 +365,12 @@ impl USBDevice {
         let current_config = str::from_utf8(&current_config).unwrap_or_default().trim();
         let current_config = u8::from_str_radix(current_config, 10).unwrap_or_default();
 
+        // Only _here_ can we add the device to epoll
+        // This lifetime management is all confusing *and* duplicated
+        let sessionid = engine.new_sid();
+        engine.add_usb_fd(dev_fd, sessionid)?;
+        linux_dev.decr_event_count = &engine.actual_needed_event_sz;
+
         let mut dev = USBDevice {
             device_descriptor: *dev_desc,
             // As a hack, we just store one single entry containing all descriptors
@@ -377,7 +386,7 @@ impl USBDevice {
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
 
-            _linux_handles: linux_dev,
+            _linux_handles: Rc::new(RefCell::new(linux_dev)),
         };
 
         // This is only used to get the currently active alt settings
@@ -387,7 +396,10 @@ impl USBDevice {
         }
         dev.reformat_config_descriptors();
 
-        Ok(dev)
+        // At the *very* end, we can send this
+        dev.send_plug_notification(sessionid, engine);
+
+        Ok(())
     }
 
     pub(crate) fn reformat_config_descriptors(&mut self) {
@@ -590,7 +602,8 @@ impl USBDevice {
     #[cfg(target_os = "linux")]
     // Re-determine active interface alt settings
     fn linux_probe_ifaces(&mut self) -> io::Result<()> {
-        self.current_if_state = self._linux_handles.reprobe_ifaces()?;
+        let linux_dev = self._linux_handles.borrow_mut();
+        self.current_if_state = linux_dev.reprobe_ifaces()?;
         Ok(())
     }
 }
@@ -1733,33 +1746,14 @@ impl USBStubEngine {
                                     sysfs_path.to_string_lossy()
                                 );
 
-                                match USBDevice::setup(dev_usb_path, Some(&sysfs_path), self) {
-                                    Ok(mut usb_dev) => {
-                                        let sessionid = self.next_session_id.get();
-                                        self.next_session_id.set(sessionid + 1);
-
-                                        // Only _here_ can we add the device to epoll
-                                        // FIXME: This lifetime management is all confusing *and* duplicated
-                                        match self
-                                            .add_usb_fd(usb_dev._linux_handles.dev_fd, sessionid)
-                                        {
-                                            Ok(_) => {
-                                                usb_dev._linux_handles.decr_event_count =
-                                                    &self.actual_needed_event_sz;
-
-                                                usb_dev.send_plug_notification(sessionid, self);
-                                            }
-                                            Err(err) => {
-                                                log::warn!(
-                                                    "Device setup failed at epoll! err = {}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        log::warn!("Device setup failed! err = {}", err);
-                                    }
+                                if let Err(err) =
+                                    USBDevice::setup(dev_usb_path, Some(&sysfs_path), self)
+                                {
+                                    log::warn!(
+                                        "Device setup failed! path = {:?}, err = {}",
+                                        dev_usb_path,
+                                        err
+                                    );
                                 }
                             } else {
                                 break;
@@ -1817,6 +1811,13 @@ impl USBStubEngine {
         self.actual_needed_event_sz.update(|x| x + 1);
 
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new_sid(&self) -> u64 {
+        let sessionid = self.next_session_id.get();
+        self.next_session_id.set(sessionid + 1);
+        sessionid
     }
 
     #[cfg(target_os = "macos")]
@@ -2119,32 +2120,14 @@ fn main() {
                             full_path.push(OsStr::from_bytes(dirname_bus.to_bytes()));
                             full_path.push(OsStr::from_bytes(dirname_dev.to_bytes()));
 
-                            match USBDevice::setup(&full_path, None, state) {
-                                Ok(mut usb_dev) => {
-                                    let sessionid = state.next_session_id.get();
-                                    state.next_session_id.set(sessionid + 1);
+                            log::debug!("inital probing, path = {:?}", full_path);
 
-                                    // Only _here_ can we add the device to epoll
-                                    // FIXME: This lifetime management is all confusing
-                                    match state.add_usb_fd(usb_dev._linux_handles.dev_fd, sessionid)
-                                    {
-                                        Ok(_) => {
-                                            usb_dev._linux_handles.decr_event_count =
-                                                &state.actual_needed_event_sz;
-
-                                            usb_dev.send_plug_notification(sessionid, state);
-                                        }
-                                        Err(err) => {
-                                            log::warn!(
-                                                "Device setup failed at epoll! err = {}",
-                                                err
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    log::warn!("Device setup failed! err = {}", err);
-                                }
+                            if let Err(err) = USBDevice::setup(&full_path, None, state) {
+                                log::warn!(
+                                    "Device setup failed! path = {:?}, err = {}",
+                                    full_path,
+                                    err
+                                );
                             }
                         }
                     }
