@@ -124,6 +124,25 @@ pub struct GenericDescriptorHeader {
     pub bLength: u8,
     pub bDescriptorType: u8,
 }
+impl super::USBDescriptor for GenericDescriptorHeader {
+    // Need to impl this to break recursion
+    fn from_bytes(b: &[u8]) -> Option<(&Self, &[u8])>
+    where
+        Self: Sized,
+    {
+        assert_eq!(core::mem::align_of::<Self>(), 1);
+        let expected_sz = core::mem::size_of::<Self>();
+        if b.len() < expected_sz {
+            None
+        } else {
+            let self_ = unsafe { &*(b.as_ptr() as *const Self) };
+            let stated_len = self_.bLength as usize;
+            let rest = b.split_at(stated_len).1;
+
+            Some((self_, rest))
+        }
+    }
+}
 
 #[repr(C, packed)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -144,6 +163,7 @@ pub struct DeviceDescriptor {
     pub iSerialNumber: u8,
     pub bNumConfigurations: u8,
 }
+impl super::USBDescriptor for DeviceDescriptor {}
 impl DeviceDescriptor {
     pub const fn validate(&self) -> bool {
         if (self.bLength as usize) < core::mem::size_of::<Self>() {
@@ -175,6 +195,7 @@ pub struct DeviceQualifierDescriptor {
     pub bNumConfigurations: u8,
     pub bReserved: u8,
 }
+impl super::USBDescriptor for DeviceQualifierDescriptor {}
 impl DeviceQualifierDescriptor {
     pub const fn validate(&self) -> bool {
         if (self.bLength as usize) < core::mem::size_of::<Self>() {
@@ -205,6 +226,7 @@ pub struct ConfigDescriptor {
     pub bmAttributes: u8,
     pub bMaxPower: u8,
 }
+impl super::USBDescriptor for ConfigDescriptor {}
 impl ConfigDescriptor {
     pub const fn validate(&self) -> bool {
         if (self.bLength as usize) < core::mem::size_of::<Self>() {
@@ -234,6 +256,7 @@ pub struct InterfaceDescriptor {
     pub bInterfaceProtocol: u8,
     pub iInterface: u8,
 }
+impl super::USBDescriptor for InterfaceDescriptor {}
 impl InterfaceDescriptor {
     pub const fn validate(&self) -> bool {
         if (self.bLength as usize) < core::mem::size_of::<Self>() {
@@ -258,6 +281,7 @@ pub struct EndpointDescriptor {
     pub wMaxPacketSize: u16,
     pub bInterval: u8,
 }
+impl super::USBDescriptor for EndpointDescriptor {}
 impl EndpointDescriptor {
     pub const fn validate(&self) -> bool {
         if (self.bLength as usize) < core::mem::size_of::<Self>() {
@@ -279,6 +303,7 @@ pub struct StringDescriptorFixed<const LEN: usize> {
     pub bDescriptorType: u8,
     pub bytes: [u8; LEN],
 }
+impl<const LEN: usize> super::USBDescriptor for StringDescriptorFixed<LEN> {}
 impl<const LEN: usize> StringDescriptorFixed<LEN> {
     pub const fn unsize(&self) -> &StringDescriptor {
         let ptr = self as *const StringDescriptorFixed<LEN>;
@@ -377,8 +402,10 @@ impl StringDescriptor {
         char::decode_utf16(u16iter)
     }
 
-    pub fn from_bytes<'a>(bytes: &'a [u8]) -> (&'a Self, &'a [u8]) {
-        assert!(bytes.len() >= core::mem::size_of::<GenericDescriptorHeader>());
+    pub fn from_bytes(bytes: &[u8]) -> Option<(&Self, &[u8])> {
+        if bytes.len() < core::mem::size_of::<GenericDescriptorHeader>() {
+            return None;
+        }
 
         // Check desc type, len
         let bytes_ptr = bytes.as_ptr();
@@ -406,7 +433,7 @@ impl StringDescriptor {
             &*fatptr
         };
 
-        (str_desc, bytes_left)
+        Some((str_desc, bytes_left))
     }
 }
 

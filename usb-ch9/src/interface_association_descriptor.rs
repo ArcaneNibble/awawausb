@@ -15,6 +15,7 @@ pub struct InterfaceAssociationDescriptor {
     pub bFunctionProtocol: u8,
     pub iFunction: u8,
 }
+impl super::USBDescriptor for InterfaceAssociationDescriptor {}
 
 #[cfg(test)]
 mod tests {
