@@ -239,6 +239,37 @@ impl USBDevice {
         Ok(dev)
     }
 
+    /// Send a device plug-in notification, while also stashing ourselves into the engine
+    pub fn send_plug_notification(self, sessionid: u64, engine: Pin<&USBStubEngine>) {
+        let notif = protocol::ResponseMessage::NewDevice {
+            sid: sessionid.to_string(),
+
+            bcdUSB: self.device_descriptor.bcdUSB,
+            bDeviceClass: self.device_descriptor.bDeviceClass,
+            bDeviceSubClass: self.device_descriptor.bDeviceSubClass,
+            bDeviceProtocol: self.device_descriptor.bDeviceProtocol,
+            idVendor: self.device_descriptor.idVendor,
+            idProduct: self.device_descriptor.idProduct,
+            bcdDevice: self.device_descriptor.bcdDevice,
+            manufacturer: self.vendor_name.clone(),
+            product: self.product_name.clone(),
+            serial: self.serial_number.clone(),
+
+            current_config: self.current_configuration_id,
+            configs: self.reformatted_config_descriptors.clone(),
+        };
+
+        let mut devices = engine.usb_devices.borrow_mut();
+        let old_dev = devices.insert(sessionid, self);
+        if old_dev.is_some() {
+            log::warn!("Got a duplicate sessionID?? 0x{:x}", sessionid);
+        }
+
+        // Send notification
+        let notif = serde_json::to_string(&notif).unwrap();
+        write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+    }
+
     #[cfg(target_os = "linux")]
     pub fn setup(
         dev_usb_path: &Path,
@@ -1758,7 +1789,11 @@ impl USBStubEngine {
                                 );
 
                                 match USBDevice::setup(dev_usb_path, &sysfs_path, self) {
-                                    Ok(usb_dev) => todo!(),
+                                    Ok(usb_dev) => {
+                                        let sessionid = self.next_session_id.get();
+                                        self.next_session_id.set(sessionid + 1);
+                                        usb_dev.send_plug_notification(sessionid, self);
+                                    }
                                     Err(err) => {
                                         log::warn!("Device setup failed! err = {}", err);
                                     }
@@ -1799,34 +1834,7 @@ impl USBStubEngine {
 
                 match USBDevice::setup(item, self_) {
                     Ok(usb_dev) => {
-                        // Prepare notification (before we stuff the object away)
-                        let notif = protocol::ResponseMessage::NewDevice {
-                            sid: sessionid.to_string(),
-
-                            bcdUSB: usb_dev.device_descriptor.bcdUSB,
-                            bDeviceClass: usb_dev.device_descriptor.bDeviceClass,
-                            bDeviceSubClass: usb_dev.device_descriptor.bDeviceSubClass,
-                            bDeviceProtocol: usb_dev.device_descriptor.bDeviceProtocol,
-                            idVendor: usb_dev.device_descriptor.idVendor,
-                            idProduct: usb_dev.device_descriptor.idProduct,
-                            bcdDevice: usb_dev.device_descriptor.bcdDevice,
-                            manufacturer: usb_dev.vendor_name.clone(),
-                            product: usb_dev.product_name.clone(),
-                            serial: usb_dev.serial_number.clone(),
-
-                            current_config: usb_dev.current_configuration_id,
-                            configs: usb_dev.reformatted_config_descriptors.clone(),
-                        };
-
-                        let mut devices = self_.usb_devices.borrow_mut();
-                        let old_dev = devices.insert(sessionid, usb_dev);
-                        if old_dev.is_some() {
-                            log::warn!("Got a duplicate sessionID?? 0x{:x}", sessionid);
-                        }
-
-                        // Send notification
-                        let notif = serde_json::to_string(&notif).unwrap();
-                        write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                        usb_dev.send_plug_notification(sessionid, self_);
                     }
                     Err(err) => {
                         log::warn!(
