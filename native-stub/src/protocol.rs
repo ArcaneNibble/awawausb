@@ -71,9 +71,6 @@ pub struct DeviceConfiguration {
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ResponseMessage {
-    EchoResponse {
-        msg: String,
-    },
     NewDevice {
         sid: String,
 
@@ -116,9 +113,6 @@ pub enum ResponseMessage {
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum RequestMessage {
-    EchoTest {
-        msg: String,
-    },
     ControlTransfer {
         sid: String,
         txn_id: String,
@@ -184,4 +178,21 @@ pub enum RequestMessage {
         iface: u8,
         alt: u8,
     },
+}
+impl RequestMessage {
+    pub fn txn_id(&self) -> &str {
+        match self {
+            RequestMessage::ControlTransfer { txn_id, .. } => txn_id,
+            RequestMessage::DataTransfer { txn_id, .. } => txn_id,
+            RequestMessage::ClearHalt { txn_id, .. } => txn_id,
+            RequestMessage::IsocTransfer { txn_id, .. } => txn_id,
+            RequestMessage::OpenDevice { txn_id, .. } => txn_id,
+            RequestMessage::CloseDevice { txn_id, .. } => txn_id,
+            RequestMessage::ResetDevice { txn_id, .. } => txn_id,
+            RequestMessage::SetConfiguration { txn_id, .. } => txn_id,
+            RequestMessage::ClaimInterface { txn_id, .. } => txn_id,
+            RequestMessage::ReleaseInterface { txn_id, .. } => txn_id,
+            RequestMessage::SetAltInterface { txn_id, .. } => txn_id,
+        }
+    }
 }

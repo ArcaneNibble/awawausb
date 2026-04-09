@@ -100,6 +100,15 @@ pub struct USBInterfaceState {
     _macos_ep_addrs: Vec<u8>,
 }
 
+/// For the "new" API, whether operations on a device should send a completion *now* or not
+pub enum DeviceOpResult {
+    /// The request is already finished, and the framework should send an *empty* completion
+    SendCompletionNow,
+    /// The request is in progress, or otherwise the framework should *not* send anything
+    ManualCompletion,
+}
+type DeviceResult = Result<DeviceOpResult, protocol::Errors>;
+
 /// Handle for a USB device
 ///
 /// May or may not be opened. Holds OS-specific handle,
@@ -534,7 +543,17 @@ impl USBDevice {
         self.ep_to_idx = ep_to_idx;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "linux")]
+    // Re-determine active interface alt settings
+    fn linux_probe_ifaces(&mut self) -> io::Result<()> {
+        let linux_dev = self._linux_handles.borrow_mut();
+        self.current_if_state = linux_dev.reprobe_ifaces()?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl USBDevice {
     /// Open or re-open all interface handles, when switching configuration
     pub(crate) fn macos_probe_ifaces(
         &mut self,
@@ -603,12 +622,560 @@ impl USBDevice {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    // Re-determine active interface alt settings
-    fn linux_probe_ifaces(&mut self) -> io::Result<()> {
-        let linux_dev = self._linux_handles.borrow_mut();
-        self.current_if_state = linux_dev.reprobe_ifaces()?;
-        Ok(())
+    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        if self.opened {
+            log::debug!(
+                "Opening already opened device, sid = {}, txn = {}",
+                sid,
+                txn_id
+            );
+            Ok(DeviceOpResult::SendCompletionNow)
+        } else {
+            log::debug!("device open, sid = {}, txn = {}", sid, txn_id);
+            if let Err(ret) = self._macos_dev.USBDeviceOpen() {
+                log::warn!(
+                    "USBDeviceOpen failed, sid = {}, txn = {}, ret = {:08x} ",
+                    sid,
+                    txn_id,
+                    ret
+                );
+                if ret == kIOReturnExclusiveAccess {
+                    Err(protocol::Errors::AlreadyClaimed)
+                } else {
+                    Err(protocol::Errors::TransferError)
+                }
+            } else {
+                // Open successful
+                self.opened = true;
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+        }
+    }
+
+    fn _check_open(&self) -> Result<(), protocol::Errors> {
+        if !self.opened {
+            Err(protocol::Errors::InvalidState)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        self._check_open()?;
+
+        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
+
+        // Release all interfaces before closing
+        for (_, iface_state) in self.current_if_state.iter_mut() {
+            if iface_state.claimed {
+                log::debug!(" -> releasing interface {}", iface_state._macos_iface_idx);
+
+                let mut mac_iface_obj =
+                    (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
+                if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
+                    log::warn!(
+                        "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                        iface_state._macos_iface_idx,
+                        sid,
+                        txn_id,
+                        ret
+                    );
+                    // If closing an interface fails, don't mark it as closed
+                    // but also don't report the failure to the host
+                    // FIXME: How is this supposed to work?
+                } else {
+                    iface_state.claimed = false;
+                }
+            }
+        }
+
+        if let Err(ret) = self._macos_dev.USBDeviceClose() {
+            log::warn!(
+                "USBDeviceClose failed, sid = {}, txn = {}, ret = {:08x} ",
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Close successful
+            self.opened = false;
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
+    }
+
+    fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        self._check_open()?;
+
+        log::debug!("device reset, sid = {}, txn = {}", sid, txn_id);
+        if let Err(ret) = self._macos_dev.USBDeviceReEnumerate(0) {
+            log::warn!(
+                "USBDeviceReEnumerate failed, sid = {}, txn = {}, ret = {:08x} ",
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Reset successful
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
+    }
+
+    fn set_configuration(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        value: u8,
+        engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
+        self._check_open()?;
+
+        log::debug!(
+            "device set config 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+        if let Err(ret) = self._macos_dev.SetConfiguration(value) {
+            log::warn!(
+                "SetConfiguration failed, sid = {}, txn = {}, ret = {:08x} ",
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Set config successful
+            self.current_configuration_id = value;
+            if let Err(ret) = self.macos_probe_ifaces(engine) {
+                log::warn!(
+                    "SetConfiguration failed reopening interfaces, sid = {}, txn = {}, ret = {:08x} ",
+                    sid,
+                    txn_id,
+                    ret
+                );
+                Err(protocol::Errors::TransferError)
+            } else {
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+        }
+    }
+
+    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if iface_state.claimed {
+            log::debug!(
+                "Claiming already claimed interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+            Ok(DeviceOpResult::SendCompletionNow)
+        } else {
+            log::debug!(
+                "device claim interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+
+            let mut mac_iface_obj =
+                (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
+            if let Err(ret) = mac_iface_obj.USBInterfaceOpen() {
+                log::warn!(
+                    "USBInterfaceOpen failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                    iface_state._macos_iface_idx,
+                    sid,
+                    txn_id,
+                    ret
+                );
+                if ret == kIOReturnExclusiveAccess {
+                    Err(protocol::Errors::AlreadyClaimed)
+                } else {
+                    Err(protocol::Errors::TransferError)
+                }
+            } else {
+                // Claim interface successful
+                iface_state.claimed = true;
+
+                // Update this !@#$ list
+                assert_eq!(iface_state._macos_ep_addrs.len(), 0);
+                let ep_nums = mac_iface_obj.get_ep_addrs();
+                for (piperef_m1, ep) in ep_nums.iter().enumerate() {
+                    let old = self
+                        ._macos_ep_to_idx
+                        .insert(*ep, (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8));
+                    if old.is_some() {
+                        log::warn!("Duplicate endpoint?! {:02x}", ep);
+                    }
+                }
+                iface_state._macos_ep_addrs = ep_nums;
+
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+        }
+    }
+
+    fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device release interface 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+
+        let mut mac_iface_obj = (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
+        if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
+            log::warn!(
+                "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
+                iface_state._macos_iface_idx,
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Release interface successful
+            iface_state.claimed = false;
+
+            // Update this !@#$ list
+            for ep in iface_state._macos_ep_addrs.drain(..) {
+                self._macos_ep_to_idx.remove(&ep);
+            }
+
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
+    }
+
+    fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device set alt interface 0x{:02x} 0x{:02x}, sid = {}, txn = {}",
+            iface,
+            alt,
+            sid,
+            txn_id
+        );
+
+        let mut mac_iface_obj = (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
+        if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
+            log::warn!(
+                "SetAlternateInterface failed {} = {:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                iface_state._macos_iface_idx,
+                alt,
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Set alt interface successful
+            iface_state.alt_setting = alt;
+
+            // Update this !@#$ list
+            for ep in iface_state._macos_ep_addrs.drain(..) {
+                self._macos_ep_to_idx.remove(&ep);
+            }
+            let ep_nums = mac_iface_obj.get_ep_addrs();
+            for (piperef_m1, ep) in ep_nums.iter().enumerate() {
+                let old = self
+                    ._macos_ep_to_idx
+                    .insert(*ep, (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8));
+                if old.is_some() {
+                    log::warn!("Duplicate endpoint?! {:02x}", ep);
+                }
+            }
+            iface_state._macos_ep_addrs = ep_nums;
+
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
+    }
+
+    fn ctrl_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        len: u16,
+        buf: Vec<u8>,
+        timeout: u64,
+    ) -> DeviceResult {
+        self._check_open()?;
+
+        if request_type & 0b11111 == 1 {
+            // If it's an interface transfer, check if the interface is claimed
+            let iface = index as u8;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
+        } else if request_type & 0b11111 == 2 {
+            // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
+            if index > 0xff {
+                return Err(protocol::Errors::InvalidNumber);
+            }
+            let ep = index as u8;
+            let iface = self
+                .ep_to_idx
+                .get(&ep)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
+            let _ = self
+                ._macos_ep_to_idx
+                .get(&ep)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+        }
+
+        log::debug!(
+            "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+            sid,
+            txn_id,
+            request_type,
+            request,
+            value,
+            index,
+            len as u16,
+            buf
+        );
+
+        let xfer = USBTransfer {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            _macos_iface: None,
+        };
+
+        if let Err(ret) = self._macos_dev.ctrl_xfer(
+            xfer,
+            request_type,
+            request,
+            value,
+            index,
+            len as u16,
+            timeout as u32,
+        ) {
+            // NOTE: A removed device doesn't seem to generate errors here
+            log::warn!(
+                "DeviceRequestAsyncTO failed, sid = {}, txn = {}, ret = {:08x} ",
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::ManualCompletion)
+        }
+    }
+
+    fn data_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        len: u32,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        self._check_open()?;
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+        let (macos_idx, macos_piperef) = self
+            ._macos_ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+
+        log::debug!(
+            "bulk/interrupt transfer, sid = {}, txn = {}, {:02x} {:08x} {:02x?}",
+            sid,
+            txn_id,
+            ep,
+            len,
+            buf
+        );
+
+        let xfer = USBTransfer {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            _macos_iface: Some(self._macos_ifaces[*macos_idx].clone()),
+        };
+
+        let mut mac_iface_obj = (*self._macos_ifaces[*macos_idx]).borrow_mut();
+        if let Err(ret) = mac_iface_obj.data_xfer(xfer, *macos_piperef, len as u32) {
+            log::warn!(
+                "Read/WritePipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                ep,
+                sid,
+                txn_id,
+                ret
+            );
+
+            if ret == kIOUSBPipeStalled {
+                Err(protocol::Errors::Stall)
+            } else {
+                Err(protocol::Errors::TransferError)
+            }
+        } else {
+            Ok(DeviceOpResult::ManualCompletion)
+        }
+    }
+
+    fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
+        self._check_open()?;
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+        let (macos_idx, macos_piperef) = self
+            ._macos_ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+
+        log::debug!("clear halt, sid = {}, txn = {}, {:02x}", sid, txn_id, ep,);
+
+        let mut mac_iface_obj = (*self._macos_ifaces[*macos_idx]).borrow_mut();
+        if let Err(ret) = mac_iface_obj.ClearPipeStallBothEnds(*macos_piperef) {
+            log::warn!(
+                "ClearPipeStallBothEnds failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                ep,
+                sid,
+                txn_id,
+                ret
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
+    }
+
+    fn isoc_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        total_len: usize,
+        pkt_len: Vec<u32>,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        self._check_open()?;
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+        let (macos_idx, macos_piperef) = self
+            ._macos_ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+
+        log::debug!(
+            "isoc transfer, sid = {}, txn = {}, {:02x} {:08x} {:?} {:02x?}",
+            sid,
+            txn_id,
+            ep,
+            total_len,
+            pkt_len,
+            buf
+        );
+
+        let macos_isoc_frames = pkt_len
+            .iter()
+            .map(|x| IOUSBIsocFrame {
+                frStatus: 0,
+                frReqCount: *x as u16,
+                frActCount: 0,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let xfer = Box::new(USBTransferIsoc {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            num_packets: pkt_len.len(),
+            _macos_frames: macos_isoc_frames,
+            _macos_iface: self._macos_ifaces[*macos_idx].clone(),
+        });
+
+        let mut mac_iface_obj = (*self._macos_ifaces[*macos_idx]).borrow_mut();
+
+        if let Err(ret) = mac_iface_obj.isoc_xfer(xfer, *macos_piperef, total_len) {
+            log::warn!(
+                "Read/WriteIsocPipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
+                ep,
+                sid,
+                txn_id,
+                ret
+            );
+
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::ManualCompletion)
+        }
     }
 }
 
@@ -847,319 +1414,99 @@ impl USBStubEngine {
         let msg = str::from_utf8(&msg).expect("failed to parse message as utf-8");
         let msg_parsed: protocol::RequestMessage =
             serde_json::from_str(&msg).expect("failed to parse message as JSON");
+        let txn_id = msg_parsed.txn_id().to_owned();
 
-        macro_rules! send_error {
-            ($txn_id:expr, $err:ident) => {
-                let reply = protocol::ResponseMessage::RequestError {
-                    txn_id: $txn_id,
-                    error: protocol::Errors::$err,
-                    bytes_written: 0,
-                };
-                let reply = serde_json::to_string(&reply).unwrap();
-                write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
-            };
-        }
-
-        macro_rules! send_completion {
-            ($txn_id:expr) => {
+        #[cfg(target_os = "macos")]
+        match self.handle_message(msg_parsed) {
+            Ok(DeviceOpResult::SendCompletionNow) => {
                 let reply = protocol::ResponseMessage::RequestComplete {
-                    txn_id: $txn_id,
+                    txn_id,
                     babble: false,
                     data: None,
                     bytes_written: 0,
                 };
                 let reply = serde_json::to_string(&reply).unwrap();
                 write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
-            };
-        }
-
-        #[cfg(target_os = "macos")]
-        match msg_parsed {
-            protocol::RequestMessage::EchoTest { msg } => {
-                let reply = protocol::ResponseMessage::EchoResponse { msg };
+            }
+            Ok(DeviceOpResult::ManualCompletion) => {
+                // Don't do anything right now
+            }
+            Err(err) => {
+                let reply = protocol::ResponseMessage::RequestError {
+                    txn_id,
+                    error: err,
+                    bytes_written: 0,
+                };
                 let reply = serde_json::to_string(&reply).unwrap();
                 write_stdout_msg(reply.as_bytes()).expect("failed to write stdout");
             }
+        }
+
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn handle_message(self: Pin<&Self>, msg_parsed: protocol::RequestMessage) -> DeviceResult {
+        match msg_parsed {
             protocol::RequestMessage::OpenDevice { sid, txn_id } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if usb_dev.opened {
-                        log::debug!(
-                            "Opening already opened device, sid = {}, txn = {}",
-                            sid,
-                            txn_id
-                        );
-                        send_completion!(txn_id);
-                    } else {
-                        log::debug!("device open, sid = {}, txn = {}", sid, txn_id);
-                        if let Err(ret) = usb_dev._macos_dev.USBDeviceOpen() {
-                            log::warn!(
-                                "USBDeviceOpen failed, sid = {}, txn = {}, ret = {:08x} ",
-                                sid,
-                                txn_id,
-                                ret
-                            );
-                            if ret == kIOReturnExclusiveAccess {
-                                send_error!(txn_id, AlreadyClaimed);
-                            } else {
-                                send_error!(txn_id, TransferError);
-                            }
-                        } else {
-                            // Open successful
-                            usb_dev.opened = true;
-                            send_completion!(txn_id);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
+
+                usb_dev.open_device(sid, &txn_id)
             }
             protocol::RequestMessage::CloseDevice { sid, txn_id } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                        // Release all interfaces before closing
-                        for (_, iface_state) in usb_dev.current_if_state.iter_mut() {
-                            if iface_state.claimed {
-                                log::debug!(
-                                    " -> releasing interface {}",
-                                    iface_state._macos_iface_idx
-                                );
-
-                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx])
-                                    .borrow_mut();
-                                if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
-                                    log::warn!(
-                                        "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
-                                        iface_state._macos_iface_idx,
-                                        sid,
-                                        txn_id,
-                                        ret
-                                    );
-                                    // If closing an interface fails, don't mark it as closed
-                                    // but also don't report the failure to the host
-                                    // FIXME: How is this supposed to work?
-                                } else {
-                                    iface_state.claimed = false;
-                                }
-                            }
-                        }
-
-                        if let Err(ret) = usb_dev._macos_dev.USBDeviceClose() {
-                            log::warn!(
-                                "USBDeviceClose failed, sid = {}, txn = {}, ret = {:08x} ",
-                                sid,
-                                txn_id,
-                                ret
-                            );
-                            send_error!(txn_id, TransferError);
-                        } else {
-                            // Close successful
-                            usb_dev.opened = false;
-                            send_completion!(txn_id);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.close_device(sid, &txn_id)
             }
             protocol::RequestMessage::ResetDevice { sid, txn_id } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        log::debug!("device reset, sid = {}, txn = {}", sid, txn_id);
-                        if let Err(ret) = usb_dev._macos_dev.USBDeviceReEnumerate(0) {
-                            log::warn!(
-                                "USBDeviceReEnumerate failed, sid = {}, txn = {}, ret = {:08x} ",
-                                sid,
-                                txn_id,
-                                ret
-                            );
-                            send_error!(txn_id, TransferError);
-                        } else {
-                            // Reset successful
-                            send_completion!(txn_id);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
+
+                usb_dev.reset_device(sid, &txn_id)
             }
             protocol::RequestMessage::SetConfiguration { sid, txn_id, value } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        log::debug!(
-                            "device set config 0x{:02x}, sid = {}, txn = {}",
-                            value,
-                            sid,
-                            txn_id
-                        );
-                        if let Err(ret) = usb_dev._macos_dev.SetConfiguration(value) {
-                            log::warn!(
-                                "SetConfiguration failed, sid = {}, txn = {}, ret = {:08x} ",
-                                sid,
-                                txn_id,
-                                ret
-                            );
-                            send_error!(txn_id, TransferError);
-                        } else {
-                            // Set config successful
-                            usb_dev.current_configuration_id = value;
-                            if let Err(ret) = usb_dev.macos_probe_ifaces(self) {
-                                log::warn!(
-                                    "SetConfiguration failed reopening interfaces, sid = {}, txn = {}, ret = {:08x} ",
-                                    sid,
-                                    txn_id,
-                                    ret
-                                );
-                                send_error!(txn_id, TransferError);
-                            } else {
-                                send_completion!(txn_id);
-                            }
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
+
+                usb_dev.set_configuration(sid, &txn_id, value, self)
             }
             protocol::RequestMessage::ClaimInterface { sid, txn_id, value } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&value) {
-                            if iface_state.claimed {
-                                log::debug!(
-                                    "Claiming already claimed interface 0x{:02x}, sid = {}, txn = {}",
-                                    value,
-                                    sid,
-                                    txn_id
-                                );
-                                send_completion!(txn_id);
-                            } else {
-                                log::debug!(
-                                    "device claim interface 0x{:02x}, sid = {}, txn = {}",
-                                    value,
-                                    sid,
-                                    txn_id
-                                );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx])
-                                    .borrow_mut();
-                                if let Err(ret) = mac_iface_obj.USBInterfaceOpen() {
-                                    log::warn!(
-                                        "USBInterfaceOpen failed {}, sid = {}, txn = {}, ret = {:08x} ",
-                                        iface_state._macos_iface_idx,
-                                        sid,
-                                        txn_id,
-                                        ret
-                                    );
-                                    if ret == kIOReturnExclusiveAccess {
-                                        send_error!(txn_id, AlreadyClaimed);
-                                    } else {
-                                        send_error!(txn_id, TransferError);
-                                    }
-                                } else {
-                                    // Claim interface successful
-                                    iface_state.claimed = true;
-
-                                    // Update this !@#$ list
-                                    assert_eq!(iface_state._macos_ep_addrs.len(), 0);
-                                    let ep_nums = mac_iface_obj.get_ep_addrs();
-                                    for (piperef_m1, ep) in ep_nums.iter().enumerate() {
-                                        let old = usb_dev._macos_ep_to_idx.insert(
-                                            *ep,
-                                            (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
-                                        );
-                                        if old.is_some() {
-                                            log::warn!("Duplicate endpoint?! {:02x}", ep);
-                                        }
-                                    }
-                                    iface_state._macos_ep_addrs = ep_nums;
-
-                                    send_completion!(txn_id);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.claim_interface(sid, &txn_id, value)
             }
             protocol::RequestMessage::ReleaseInterface { sid, txn_id, value } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&value) {
-                            if !iface_state.claimed {
-                                send_error!(txn_id, InvalidState);
-                            } else {
-                                log::debug!(
-                                    "device release interface 0x{:02x}, sid = {}, txn = {}",
-                                    value,
-                                    sid,
-                                    txn_id
-                                );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx])
-                                    .borrow_mut();
-                                if let Err(ret) = mac_iface_obj.USBInterfaceClose() {
-                                    log::warn!(
-                                        "USBInterfaceClose failed {}, sid = {}, txn = {}, ret = {:08x} ",
-                                        iface_state._macos_iface_idx,
-                                        sid,
-                                        txn_id,
-                                        ret
-                                    );
-                                    send_error!(txn_id, TransferError);
-                                } else {
-                                    // Release interface successful
-                                    iface_state.claimed = false;
-
-                                    // Update this !@#$ list
-                                    for ep in iface_state._macos_ep_addrs.drain(..) {
-                                        usb_dev._macos_ep_to_idx.remove(&ep);
-                                    }
-
-                                    send_completion!(txn_id);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.release_interface(sid, &txn_id, value)
             }
             protocol::RequestMessage::SetAltInterface {
                 sid,
@@ -1170,65 +1517,11 @@ impl USBStubEngine {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if !usb_dev.opened {
-                        send_error!(txn_id, InvalidState);
-                    } else {
-                        if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
-                            if !iface_state.claimed {
-                                send_error!(txn_id, InvalidState);
-                            } else {
-                                log::debug!(
-                                    "device set alt interface 0x{:02x} 0x{:02x}, sid = {}, txn = {}",
-                                    iface,
-                                    alt,
-                                    sid,
-                                    txn_id
-                                );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                let mut mac_iface_obj = (*usb_dev._macos_ifaces
-                                    [iface_state._macos_iface_idx])
-                                    .borrow_mut();
-                                if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
-                                    log::warn!(
-                                        "SetAlternateInterface failed {} = {:02x}, sid = {}, txn = {}, ret = {:08x} ",
-                                        iface_state._macos_iface_idx,
-                                        alt,
-                                        sid,
-                                        txn_id,
-                                        ret
-                                    );
-                                    send_error!(txn_id, TransferError);
-                                } else {
-                                    // Set alt interface successful
-                                    iface_state.alt_setting = alt;
-
-                                    // Update this !@#$ list
-                                    for ep in iface_state._macos_ep_addrs.drain(..) {
-                                        usb_dev._macos_ep_to_idx.remove(&ep);
-                                    }
-                                    let ep_nums = mac_iface_obj.get_ep_addrs();
-                                    for (piperef_m1, ep) in ep_nums.iter().enumerate() {
-                                        let old = usb_dev._macos_ep_to_idx.insert(
-                                            *ep,
-                                            (iface_state._macos_iface_idx, (piperef_m1 + 1) as u8),
-                                        );
-                                        if old.is_some() {
-                                            log::warn!("Duplicate endpoint?! {:02x}", ep);
-                                        }
-                                    }
-                                    iface_state._macos_ep_addrs = ep_nums;
-
-                                    send_completion!(txn_id);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.set_alt_interface(sid, &txn_id, iface, alt)
             }
             protocol::RequestMessage::ControlTransfer {
                 sid,
@@ -1266,8 +1559,7 @@ impl USBStubEngine {
                 assert!(txn_ok, "received malformed request");
                 // Deal with data size limits
                 if len > u16::MAX as usize {
-                    send_error!(txn_id, RequestTooBig);
-                    return true;
+                    return Err(protocol::Errors::RequestTooBig);
                 }
 
                 // timeout of 0 --> no timeout
@@ -1276,47 +1568,22 @@ impl USBStubEngine {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    log::debug!(
-                        "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
-                        sid,
-                        txn_id,
-                        request_type,
-                        request,
-                        value,
-                        index,
-                        len as u16,
-                        buf
-                    );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                    let xfer = USBTransfer {
-                        dir,
-                        txn_id: txn_id.clone(),
-                        buf,
-                        _macos_iface: None,
-                    };
-
-                    if let Err(ret) = usb_dev._macos_dev.ctrl_xfer(
-                        xfer,
-                        request_type,
-                        request,
-                        value,
-                        index,
-                        len as u16,
-                        timeout as u32,
-                    ) {
-                        // NOTE: A removed device doesn't seem to generate errors here
-                        log::warn!(
-                            "DeviceRequestAsyncTO failed, sid = {}, txn = {}, ret = {:08x} ",
-                            sid,
-                            txn_id,
-                            ret
-                        );
-                        send_error!(txn_id, TransferError);
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.ctrl_xfer(
+                    sid,
+                    &txn_id,
+                    dir,
+                    request_type,
+                    request,
+                    value,
+                    index,
+                    len as u16,
+                    buf,
+                    timeout,
+                )
             }
             protocol::RequestMessage::DataTransfer {
                 sid,
@@ -1350,128 +1617,27 @@ impl USBStubEngine {
                 assert!(txn_ok, "received malformed request");
                 // Deal with data size limits
                 if len > u32::MAX as usize {
-                    send_error!(txn_id, RequestTooBig);
-                    return true;
+                    return Err(protocol::Errors::RequestTooBig);
                 }
 
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if usb_dev.opened {
-                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
-                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
-                                if iface_state.claimed {
-                                    if let Some((macos_idx, macos_piperef)) =
-                                        usb_dev._macos_ep_to_idx.get(&ep)
-                                    {
-                                        log::debug!(
-                                            "bulk/interrupt transfer, sid = {}, txn = {}, {:02x} {:04x} {:02x?}",
-                                            sid,
-                                            txn_id,
-                                            ep,
-                                            len as u16,
-                                            buf
-                                        );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                        let xfer = USBTransfer {
-                                            dir,
-                                            txn_id: txn_id.clone(),
-                                            buf,
-                                            _macos_iface: Some(
-                                                usb_dev._macos_ifaces[*macos_idx].clone(),
-                                            ),
-                                        };
-
-                                        let mut mac_iface_obj =
-                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
-                                        if let Err(ret) = mac_iface_obj.data_xfer(
-                                            xfer,
-                                            *macos_piperef,
-                                            len as u32,
-                                        ) {
-                                            log::warn!(
-                                                "Read/WritePipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
-                                                ep,
-                                                sid,
-                                                txn_id,
-                                                ret
-                                            );
-
-                                            if ret == kIOUSBPipeStalled {
-                                                send_error!(txn_id, Stall);
-                                            } else {
-                                                send_error!(txn_id, TransferError);
-                                            }
-                                        }
-                                    } else {
-                                        send_error!(txn_id, InvalidNumber);
-                                    }
-                                } else {
-                                    send_error!(txn_id, InvalidState);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    } else {
-                        send_error!(txn_id, InvalidState);
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.data_xfer(sid, &txn_id, dir, ep, len as u32, buf)
             }
             protocol::RequestMessage::ClearHalt { sid, txn_id, ep } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if usb_dev.opened {
-                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
-                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
-                                if iface_state.claimed {
-                                    if let Some((macos_idx, macos_piperef)) =
-                                        usb_dev._macos_ep_to_idx.get(&ep)
-                                    {
-                                        log::debug!(
-                                            "clear halt, sid = {}, txn = {}, {:02x}",
-                                            sid,
-                                            txn_id,
-                                            ep,
-                                        );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                        let mut mac_iface_obj =
-                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
-                                        if let Err(ret) =
-                                            mac_iface_obj.ClearPipeStallBothEnds(*macos_piperef)
-                                        {
-                                            log::warn!(
-                                                "ClearPipeStallBothEnds failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
-                                                ep,
-                                                sid,
-                                                txn_id,
-                                                ret
-                                            );
-                                            send_error!(txn_id, TransferError);
-                                        } else {
-                                            send_completion!(txn_id);
-                                        }
-                                    } else {
-                                        send_error!(txn_id, InvalidNumber);
-                                    }
-                                } else {
-                                    send_error!(txn_id, InvalidState);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    } else {
-                        send_error!(txn_id, InvalidState);
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.clear_halt(sid, &txn_id, ep)
             }
             protocol::RequestMessage::IsocTransfer {
                 sid,
@@ -1484,13 +1650,11 @@ impl USBStubEngine {
                 let mut total_len = 0;
                 let num_pkts = pkt_len.len();
                 if num_pkts > u32::MAX as usize {
-                    send_error!(txn_id, RequestTooBig);
-                    return true;
+                    return Err(protocol::Errors::RequestTooBig);
                 }
                 for l in &pkt_len {
                     if *l > u16::MAX as u32 {
-                        send_error!(txn_id, RequestTooBig);
-                        return true;
+                        return Err(protocol::Errors::RequestTooBig);
                     }
                     total_len += *l as usize;
                 }
@@ -1523,79 +1687,13 @@ impl USBStubEngine {
                 let sid = sid.parse::<u64>().expect("received malformed request");
 
                 let mut devices = self.usb_devices.borrow_mut();
-                if let Some(usb_dev) = devices.get_mut(&sid) {
-                    if usb_dev.opened {
-                        if let Some(iface) = usb_dev.ep_to_idx.get(&ep) {
-                            if let Some(iface_state) = usb_dev.current_if_state.get_mut(&iface) {
-                                if iface_state.claimed {
-                                    if let Some((macos_idx, macos_piperef)) =
-                                        usb_dev._macos_ep_to_idx.get(&ep)
-                                    {
-                                        log::debug!(
-                                            "isoc transfer, sid = {}, txn = {}, {:02x} {:08x} {:?} {:02x?}",
-                                            sid,
-                                            txn_id,
-                                            ep,
-                                            total_len,
-                                            pkt_len,
-                                            buf
-                                        );
+                let usb_dev = devices
+                    .get_mut(&sid)
+                    .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                                        let macos_isoc_frames = pkt_len
-                                            .iter()
-                                            .map(|x| IOUSBIsocFrame {
-                                                frStatus: 0,
-                                                frReqCount: *x as u16,
-                                                frActCount: 0,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .into_boxed_slice();
-
-                                        let xfer = Box::new(USBTransferIsoc {
-                                            dir,
-                                            txn_id: txn_id.clone(),
-                                            buf,
-                                            num_packets: num_pkts,
-                                            _macos_frames: macos_isoc_frames,
-                                            _macos_iface: usb_dev._macos_ifaces[*macos_idx].clone(),
-                                        });
-
-                                        let mut mac_iface_obj =
-                                            (*usb_dev._macos_ifaces[*macos_idx]).borrow_mut();
-
-                                        if let Err(ret) =
-                                            mac_iface_obj.isoc_xfer(xfer, *macos_piperef, total_len)
-                                        {
-                                            log::warn!(
-                                                "Read/WriteIsocPipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
-                                                ep,
-                                                sid,
-                                                txn_id,
-                                                ret
-                                            );
-
-                                            send_error!(txn_id, TransferError);
-                                        }
-                                    } else {
-                                        send_error!(txn_id, InvalidNumber);
-                                    }
-                                } else {
-                                    send_error!(txn_id, InvalidState);
-                                }
-                            }
-                        } else {
-                            send_error!(txn_id, InvalidNumber);
-                        }
-                    } else {
-                        send_error!(txn_id, InvalidState);
-                    }
-                } else {
-                    send_error!(txn_id, DeviceNotFound);
-                }
+                usb_dev.isoc_xfer(sid, &txn_id, dir, ep, total_len, pkt_len, buf)
             }
         }
-
-        true
     }
 
     #[cfg(target_os = "macos")]
