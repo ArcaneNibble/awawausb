@@ -126,9 +126,7 @@ pub struct USBDevice {
     /// Linux-specific state
     /// TODO: Drop this properly
     #[cfg(target_os = "linux")]
-    _linux_sysfs_dirfd: i32,
-    #[cfg(target_os = "linux")]
-    _linux_usb_fd: i32,
+    _linux_handles: LinuxHandles,
 
     /// Map from endpoint address to (interface index, pipeRef)
     ///
@@ -276,6 +274,8 @@ impl USBDevice {
         sysfs_dev_path: Option<&Path>,
         engine: Pin<&USBStubEngine>,
     ) -> io::Result<Self> {
+        let mut linux_dev = LinuxHandles::new();
+
         let dev_fd = unsafe {
             libc::open(
                 CString::new(dev_usb_path.as_os_str().as_bytes())
@@ -287,7 +287,7 @@ impl USBDevice {
         if dev_fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        dbg!(dev_fd);
+        linux_dev.dev_fd = dev_fd;
 
         let mut sysfs_char_path = PathBuf::new();
         let sysfs_dev_path = if let Some(p) = sysfs_dev_path {
@@ -322,7 +322,7 @@ impl USBDevice {
         if sysfs_dirfd < 0 {
             return Err(io::Error::last_os_error());
         }
-        dbg!(sysfs_dirfd);
+        linux_dev.sysfs_fd = sysfs_dirfd;
 
         // Get all descriptors
         let all_descriptors = read_entire_sysfs_file(sysfs_dirfd, c"descriptors")?;
@@ -375,8 +375,7 @@ impl USBDevice {
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
 
-            _linux_sysfs_dirfd: sysfs_dirfd,
-            _linux_usb_fd: dev_fd,
+            _linux_handles: linux_dev,
         };
 
         // This is only used to get the currently active alt settings
@@ -589,75 +588,7 @@ impl USBDevice {
     #[cfg(target_os = "linux")]
     // Re-determine active interface alt settings
     fn linux_probe_ifaces(&mut self) -> io::Result<()> {
-        let dir = unsafe {
-            libc::fdopendir(libc::fcntl(
-                self._linux_sysfs_dirfd,
-                libc::F_DUPFD_CLOEXEC,
-                0,
-            ))
-        };
-        if dir.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        unsafe {
-            libc::rewinddir(dir);
-        }
-
-        let mut if_states = HashMap::new();
-
-        loop {
-            let dirent = unsafe { libc::readdir(dir) };
-            if dirent.is_null() {
-                break;
-            }
-            let dirent = unsafe { *dirent };
-
-            if dirent.d_type == libc::DT_DIR {
-                let dirname = CStr::from_bytes_until_nul(&dirent.d_name).unwrap();
-                if dirname != c"." && dirname != c".." {
-                    let mut iface_fn = dirname.to_bytes().to_vec();
-                    iface_fn.extend_from_slice(b"/bInterfaceNumber\x00");
-                    let iface = read_entire_sysfs_file(
-                        self._linux_sysfs_dirfd,
-                        CString::from_vec_with_nul(iface_fn).unwrap().as_c_str(),
-                    )?;
-                    if iface.is_none() {
-                        continue;
-                    }
-                    let iface = iface.unwrap();
-
-                    let mut alt_setting_fn = dirname.to_bytes().to_vec();
-                    alt_setting_fn.extend_from_slice(b"/bAlternateSetting\x00");
-                    let alt_setting = read_entire_sysfs_file(
-                        self._linux_sysfs_dirfd,
-                        CString::from_vec_with_nul(alt_setting_fn)
-                            .unwrap()
-                            .as_c_str(),
-                    )?
-                    .unwrap_or_default();
-
-                    let iface = str::from_utf8(&iface).unwrap_or_default().trim();
-                    let iface = u8::from_str_radix(iface, 16).unwrap_or_default();
-                    let alt_setting = str::from_utf8(&alt_setting).unwrap_or_default().trim();
-                    let alt_setting = u8::from_str_radix(alt_setting, 10).unwrap_or_default();
-
-                    let old = if_states.insert(
-                        iface,
-                        USBInterfaceState {
-                            alt_setting,
-                            claimed: false,
-                        },
-                    );
-                    if old.is_some() {
-                        log::warn!("Duplicate interface?? {}", iface);
-                    }
-                }
-            }
-        }
-
-        unsafe { libc::closedir(dir) };
-        self.current_if_state = if_states;
-
+        self.current_if_state = self._linux_handles.reprobe_ifaces()?;
         Ok(())
     }
 }
