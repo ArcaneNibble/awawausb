@@ -328,6 +328,7 @@ impl UdevNetlinkSocket {
 
             // Deal with received sizes
             let payload_sz = pkt_sz - mem::size_of::<UdevFeedcafeMessageHeader>();
+            #[repr(C)]
             struct FatPointer {
                 ptr: *mut u8,
                 sz: usize,

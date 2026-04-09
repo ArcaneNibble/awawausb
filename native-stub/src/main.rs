@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::Infallible;
 #[cfg(target_os = "linux")]
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::mem;
 #[cfg(target_os = "linux")]
@@ -122,6 +122,13 @@ pub struct USBDevice {
     pub current_configuration_id: u8,
     /// Map from bInterfaceNumber to state
     pub current_if_state: HashMap<u8, USBInterfaceState>,
+
+    /// Linux-specific state
+    /// TODO: Drop this properly
+    #[cfg(target_os = "linux")]
+    _linux_sysfs_dirfd: i32,
+    #[cfg(target_os = "linux")]
+    _linux_usb_fd: i32,
 
     /// Map from endpoint address to (interface index, pipeRef)
     ///
@@ -256,7 +263,7 @@ impl USBDevice {
                 CString::new(sysfs_dev_path.as_os_str().as_bytes())
                     .unwrap()
                     .as_ptr(),
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
         if sysfs_dirfd < 0 {
@@ -299,8 +306,8 @@ impl USBDevice {
         // Just try to get the current config, goddamit
         let current_config =
             read_entire_sysfs_file(sysfs_dirfd, c"bConfigurationValue")?.unwrap_or_default();
-        let current_config = str::from_utf8(&current_config).unwrap_or_default();
-        let current_config = str::parse::<u8>(current_config).unwrap_or_default();
+        let current_config = str::from_utf8(&current_config).unwrap_or_default().trim();
+        let current_config = u8::from_str_radix(current_config, 10).unwrap_or_default();
 
         // TODO: Probe interfaces state
 
@@ -318,8 +325,15 @@ impl USBDevice {
             opened: false,
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
+
+            _linux_sysfs_dirfd: sysfs_dirfd,
+            _linux_usb_fd: dev_fd,
         };
 
+        if let Err(e) = dev.linux_probe_ifaces() {
+            log::warn!("probing interfaces failed {}", e);
+            // Tolerate this error
+        }
         dev.reformat_config_descriptors();
         dbg!(&dev);
 
@@ -519,6 +533,86 @@ impl USBDevice {
 
         self.current_if_state = if_states;
         self._macos_ifaces = ifaces;
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    // Re-determine active interface alt settings
+    fn linux_probe_ifaces(&mut self) -> io::Result<()> {
+        dbg!("probe ifaces");
+        let dir = unsafe {
+            libc::fdopendir(libc::fcntl(
+                self._linux_sysfs_dirfd,
+                libc::F_DUPFD_CLOEXEC,
+                0,
+            ))
+        };
+        if dir.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            libc::rewinddir(dir);
+        }
+        dbg!("opened dirs");
+
+        let mut if_states = HashMap::new();
+
+        loop {
+            let dirent = unsafe { libc::readdir(dir) };
+            if dirent.is_null() {
+                break;
+            }
+            let dirent = unsafe { *dirent };
+
+            if dirent.d_type & libc::DT_DIR != 0 {
+                let dirname = CStr::from_bytes_until_nul(&dirent.d_name).unwrap();
+                if dirname != c"." && dirname != c".." {
+                    dbg!(dirname);
+
+                    let mut iface_fn = dirname.to_bytes().to_vec();
+                    iface_fn.extend_from_slice(b"/bInterfaceNumber\x00");
+                    let iface = read_entire_sysfs_file(
+                        self._linux_sysfs_dirfd,
+                        CString::from_vec_with_nul(iface_fn).unwrap().as_c_str(),
+                    )?;
+                    if iface.is_none() {
+                        continue;
+                    }
+                    let iface = iface.unwrap();
+
+                    let mut alt_setting_fn = dirname.to_bytes().to_vec();
+                    alt_setting_fn.extend_from_slice(b"/bAlternateSetting\x00");
+                    let alt_setting = read_entire_sysfs_file(
+                        self._linux_sysfs_dirfd,
+                        CString::from_vec_with_nul(alt_setting_fn)
+                            .unwrap()
+                            .as_c_str(),
+                    )?
+                    .unwrap_or_default();
+
+                    let iface = str::from_utf8(&iface).unwrap_or_default().trim();
+                    let iface = u8::from_str_radix(iface, 16).unwrap_or_default();
+                    let alt_setting = str::from_utf8(&alt_setting).unwrap_or_default().trim();
+                    let alt_setting = u8::from_str_radix(alt_setting, 10).unwrap_or_default();
+                    dbg!(iface, alt_setting);
+
+                    let old = if_states.insert(
+                        iface,
+                        USBInterfaceState {
+                            alt_setting,
+                            claimed: false,
+                        },
+                    );
+                    if old.is_some() {
+                        log::warn!("Duplicate interface?? {}", iface);
+                    }
+                }
+            }
+        }
+
+        unsafe { libc::closedir(dir) };
+        self.current_if_state = if_states;
 
         Ok(())
     }
