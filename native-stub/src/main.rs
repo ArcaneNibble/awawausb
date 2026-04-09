@@ -273,7 +273,7 @@ impl USBDevice {
     #[cfg(target_os = "linux")]
     pub fn setup(
         dev_usb_path: &Path,
-        sysfs_dev_path: &Path,
+        sysfs_dev_path: Option<&Path>,
         engine: Pin<&USBStubEngine>,
     ) -> io::Result<Self> {
         let dev_fd = unsafe {
@@ -288,6 +288,28 @@ impl USBDevice {
             return Err(io::Error::last_os_error());
         }
         dbg!(dev_fd);
+
+        let mut sysfs_char_path = PathBuf::new();
+        let sysfs_dev_path = if let Some(p) = sysfs_dev_path {
+            p
+        } else {
+            let char_dev_stat = unsafe {
+                let mut stat = mem::MaybeUninit::<libc::stat>::zeroed();
+                let ret = libc::fstat(dev_fd, stat.as_mut_ptr());
+                if ret < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                stat.assume_init()
+            };
+            // WTF is this?
+            let maj = (((char_dev_stat.st_rdev & 0xFFFFF000_00000000) >> 32)
+                | ((char_dev_stat.st_rdev & 0xFFF00) >> 8)) as u32;
+            let min = (((char_dev_stat.st_rdev & 0xFFF_FFF0_0000) >> 12)
+                | (char_dev_stat.st_rdev & 0xFF)) as u32;
+            sysfs_char_path.push("/sys/dev/char");
+            sysfs_char_path.push(format!("{}:{}", maj, min));
+            &sysfs_char_path
+        };
 
         let sysfs_dirfd = unsafe {
             libc::open(
@@ -312,11 +334,9 @@ impl USBDevice {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
         let all_descriptors = all_descriptors.unwrap();
-        dbg!(&all_descriptors);
         let (dev_desc, config_descs) = if let Some((dev_desc, config_descs)) =
             usb_ch9::ch9_core::DeviceDescriptor::from_bytes(&all_descriptors)
         {
-            dbg!(dev_desc, config_descs);
             (dev_desc, config_descs)
         } else {
             log::warn!(
@@ -340,8 +360,6 @@ impl USBDevice {
         let current_config = str::from_utf8(&current_config).unwrap_or_default().trim();
         let current_config = u8::from_str_radix(current_config, 10).unwrap_or_default();
 
-        // TODO: Probe interfaces state
-
         let mut dev = USBDevice {
             device_descriptor: *dev_desc,
             // As a hack, we just store one single entry containing all descriptors
@@ -361,12 +379,12 @@ impl USBDevice {
             _linux_usb_fd: dev_fd,
         };
 
+        // This is only used to get the currently active alt settings
         if let Err(e) = dev.linux_probe_ifaces() {
             log::warn!("probing interfaces failed {}", e);
             // Tolerate this error
         }
         dev.reformat_config_descriptors();
-        dbg!(&dev);
 
         Ok(dev)
     }
@@ -571,7 +589,6 @@ impl USBDevice {
     #[cfg(target_os = "linux")]
     // Re-determine active interface alt settings
     fn linux_probe_ifaces(&mut self) -> io::Result<()> {
-        dbg!("probe ifaces");
         let dir = unsafe {
             libc::fdopendir(libc::fcntl(
                 self._linux_sysfs_dirfd,
@@ -585,7 +602,6 @@ impl USBDevice {
         unsafe {
             libc::rewinddir(dir);
         }
-        dbg!("opened dirs");
 
         let mut if_states = HashMap::new();
 
@@ -596,11 +612,9 @@ impl USBDevice {
             }
             let dirent = unsafe { *dirent };
 
-            if dirent.d_type & libc::DT_DIR != 0 {
+            if dirent.d_type == libc::DT_DIR {
                 let dirname = CStr::from_bytes_until_nul(&dirent.d_name).unwrap();
                 if dirname != c"." && dirname != c".." {
-                    dbg!(dirname);
-
                     let mut iface_fn = dirname.to_bytes().to_vec();
                     iface_fn.extend_from_slice(b"/bInterfaceNumber\x00");
                     let iface = read_entire_sysfs_file(
@@ -626,7 +640,6 @@ impl USBDevice {
                     let iface = u8::from_str_radix(iface, 16).unwrap_or_default();
                     let alt_setting = str::from_utf8(&alt_setting).unwrap_or_default().trim();
                     let alt_setting = u8::from_str_radix(alt_setting, 10).unwrap_or_default();
-                    dbg!(iface, alt_setting);
 
                     let old = if_states.insert(
                         iface,
@@ -1788,7 +1801,7 @@ impl USBStubEngine {
                                     sysfs_path.to_string_lossy()
                                 );
 
-                                match USBDevice::setup(dev_usb_path, &sysfs_path, self) {
+                                match USBDevice::setup(dev_usb_path, Some(&sysfs_path), self) {
                                     Ok(usb_dev) => {
                                         let sessionid = self.next_session_id.get();
                                         self.next_session_id.set(sessionid + 1);
@@ -2070,6 +2083,75 @@ fn main() {
     // because OS callbacks etc hold a reference to the engine object.
     // This is probably *still* incorrect, but dunno how to fix.
     let state = state.as_ref();
+
+    #[cfg(target_os = "linux")]
+    // Now we have to do *this stupid bullshit* to find existing USB devices
+    'find_existing_devs: {
+        let dir_usbroot = unsafe { libc::opendir(c"/dev/bus/usb".as_ptr()) };
+        if dir_usbroot.is_null() {
+            break 'find_existing_devs;
+        }
+
+        loop {
+            let dirent_bus = unsafe { libc::readdir(dir_usbroot) };
+            if dirent_bus.is_null() {
+                break;
+            }
+            let dirent_bus = unsafe { *dirent_bus };
+
+            if dirent_bus.d_type == libc::DT_DIR {
+                let dirname_bus = CStr::from_bytes_until_nul(&dirent_bus.d_name).unwrap();
+                if dirname_bus != c"." && dirname_bus != c".." {
+                    let mut path_bus = b"/dev/bus/usb/".to_vec();
+                    path_bus.extend_from_slice(dirname_bus.to_bytes());
+                    path_bus.push(0);
+
+                    let dir_bus = unsafe {
+                        libc::opendir(CString::from_vec_with_nul(path_bus).unwrap().as_ptr())
+                    };
+                    if dir_bus.is_null() {
+                        continue;
+                    }
+
+                    loop {
+                        let dirent_dev = unsafe { libc::readdir(dir_bus) };
+                        if dirent_dev.is_null() {
+                            break;
+                        }
+                        let dirent_dev = unsafe { *dirent_dev };
+
+                        if dirent_dev.d_type == libc::DT_CHR {
+                            let dirname_dev =
+                                CStr::from_bytes_until_nul(&dirent_dev.d_name).unwrap();
+
+                            let mut full_path = PathBuf::new();
+                            full_path.push("/dev/bus/usb");
+                            full_path.push(OsStr::from_bytes(dirname_bus.to_bytes()));
+                            full_path.push(OsStr::from_bytes(dirname_dev.to_bytes()));
+
+                            dbg!(&full_path);
+
+                            match USBDevice::setup(&full_path, None, state) {
+                                Ok(usb_dev) => {
+                                    let sessionid = state.next_session_id.get();
+                                    state.next_session_id.set(sessionid + 1);
+                                    usb_dev.send_plug_notification(sessionid, state);
+                                }
+                                Err(err) => {
+                                    log::warn!("Device setup failed! err = {}", err);
+                                }
+                            }
+                        }
+                    }
+
+                    unsafe { libc::closedir(dir_bus) };
+                }
+            }
+        }
+
+        unsafe { libc::closedir(dir_usbroot) };
+    }
+
     while state.run_loop() {}
 
     log::info!("awawausb stub exiting!");
