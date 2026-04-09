@@ -1009,10 +1009,13 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
-        self._check_open()?;
+        // As a special exception, "device" control transfers do *not* require the device to be open
+        // This is a hack for the "interal" page access. The JS API does it's *own* check for this,
+        // so user pages do still need to have the device open.
 
         if request_type & 0b11111 == 1 {
             // If it's an interface transfer, check if the interface is claimed
+            self._check_open()?;
             let iface = index as u8;
             let iface_state = self
                 .current_if_state
@@ -1023,6 +1026,7 @@ impl USBDevice {
             }
         } else if request_type & 0b11111 == 2 {
             // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
+            self._check_open()?;
             if index > 0xff {
                 return Err(protocol::Errors::InvalidNumber);
             }
