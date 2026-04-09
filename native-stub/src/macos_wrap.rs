@@ -1,6 +1,8 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ptr;
+use std::rc::Rc;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use core_foundation::{
     base::{CFType, FromVoid, TCFType},
     number::CFNumber,
@@ -299,6 +301,20 @@ pub struct PipeProperties {
 }
 
 #[derive(Debug)]
+/// A USB transfer's metadata, specifically for isochronous requests
+pub struct USBTransferIsoc {
+    pub dir: crate::USBTransferDirection,
+    pub txn_id: String,
+    pub buf: Vec<u8>,
+    pub num_packets: usize,
+
+    #[cfg(target_os = "macos")]
+    _macos_frames: Box<[IOUSBIsocFrame]>,
+    #[cfg(target_os = "macos")]
+    _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
+}
+
+#[derive(Debug)]
 pub struct IOUSBInterfaceStruct(
     *mut *const IOUSBInterfaceStruct197,
     pub(crate) *const Cell<usize>,
@@ -464,17 +480,44 @@ impl IOUSBInterfaceStruct {
 
     pub fn isoc_xfer(
         &mut self,
-        mut xfer_obj: Box<crate::USBTransferIsoc>,
+        self2: Rc<RefCell<Self>>,
+        txn_id: &str,
+        mut buf: Vec<u8>,
         pipe_ref: u8,
+        pkt_len: Vec<u32>,
         total_len: usize,
+        dir: crate::USBTransferDirection,
     ) -> Result<(), kern_return_t> {
-        // Set up args (most of the preparing is already done)
-        assert!(total_len <= xfer_obj.buf.capacity());
-        let num_packets = xfer_obj.num_packets;
-        let buf_ptr = xfer_obj.buf.as_mut_ptr();
-        let dir = xfer_obj.dir;
-        let frame_list = xfer_obj._macos_frames.as_mut_ptr();
-        let xfer_ptr = Box::into_raw(xfer_obj);
+        assert!(total_len <= buf.capacity());
+        assert_eq!(self as *mut _, self2.as_ptr());
+
+        // IOKit/kernel frame list
+        let macos_isoc_frames = pkt_len
+            .iter()
+            .map(|x| IOUSBIsocFrame {
+                frStatus: 0,
+                frReqCount: *x as u16,
+                frActCount: 0,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        // "Back up" value we need later
+        let buf_ptr = buf.as_mut_ptr();
+
+        // Callback state
+        let mut xfer = Box::new(USBTransferIsoc {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            num_packets: pkt_len.len(),
+            _macos_frames: macos_isoc_frames,
+            _macos_iface: self2,
+        });
+
+        // We need to make sure this callback state's ownership is transferred away
+        let frame_list = xfer._macos_frames.as_mut_ptr();
+        let xfer_ptr = Box::into_raw(xfer);
 
         let mut bus_frame = 0;
         let mut bus_time = 0;
@@ -495,9 +538,9 @@ impl IOUSBInterfaceStruct {
                     pipe_ref,
                     buf_ptr as *const (),
                     bus_frame,
-                    num_packets as u32,
+                    pkt_len.len() as u32,
                     frame_list,
-                    crate::USBStubEngine::iokit_usb_completion_isoc,
+                    iokit_usb_completion_isoc,
                     xfer_ptr as *const (),
                 )
             },
@@ -507,9 +550,9 @@ impl IOUSBInterfaceStruct {
                     pipe_ref,
                     buf_ptr as *mut (),
                     bus_frame,
-                    num_packets as u32,
+                    pkt_len.len() as u32,
                     frame_list,
-                    crate::USBStubEngine::iokit_usb_completion_isoc,
+                    iokit_usb_completion_isoc,
                     xfer_ptr as *const (),
                 )
             },
@@ -532,5 +575,74 @@ impl Drop for IOUSBInterfaceStruct {
                 needed_events.update(|x| x - 1);
             }
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn iokit_usb_completion_isoc(
+    refcon: *const (),
+    result: libc::kern_return_t,
+    _arg0: *const (),
+) {
+    // Recover ownership of the transfer
+    // SAFETY: This was previously allocated via Box
+    let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransferIsoc) };
+
+    let mut had_unwanted_error = false;
+
+    let mut pkt_status = Vec::with_capacity(xfer.num_packets);
+    let mut pkt_lens = Vec::with_capacity(xfer.num_packets);
+    let mut total_len = 0;
+    for i in 0..xfer.num_packets {
+        pkt_status.push(match xfer._macos_frames[i].frStatus {
+            0 => crate::protocol::IsocPacketState::Ok,
+            #[allow(non_upper_case_globals)]
+            kIOReturnOverrun => crate::protocol::IsocPacketState::Babble,
+            _ => {
+                had_unwanted_error = true;
+                crate::protocol::IsocPacketState::Error
+            }
+        });
+        pkt_lens.push(xfer._macos_frames[i].frActCount as u32);
+        total_len += xfer._macos_frames[i].frActCount as usize;
+    }
+    let data = if xfer.dir == crate::USBTransferDirection::DeviceToHost {
+        // Update the size of received data
+        unsafe {
+            xfer.buf.set_len(total_len);
+        }
+        Some(URL_SAFE_NO_PAD.encode(&xfer.buf))
+    } else {
+        None
+    };
+
+    log::debug!(
+        "isoc request {} finished, err {:08x}, buf {:02x?} status {:08x?} len {:?}",
+        xfer.txn_id,
+        result,
+        xfer.buf,
+        pkt_status,
+        pkt_lens,
+    );
+
+    if had_unwanted_error || (result != 0 && result != kIOReturnOverrun) {
+        // An error, of a type we don't "tolerate"
+        let notif = crate::protocol::ResponseMessage::RequestError {
+            txn_id: xfer.txn_id,
+            error: crate::protocol::Errors::TransferError,
+            bytes_written: total_len as u64,
+        };
+        let notif = serde_json::to_string(&notif).unwrap();
+        crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+    } else {
+        // Success
+        let notif = crate::protocol::ResponseMessage::IsocRequestComplete {
+            txn_id: xfer.txn_id,
+            data,
+            pkt_status,
+            pkt_len: pkt_lens,
+        };
+        let notif = serde_json::to_string(&notif).unwrap();
+        crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
     }
 }

@@ -73,20 +73,6 @@ pub struct USBTransfer {
     _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 
-#[derive(Debug)]
-/// A USB transfer, specifically for isochronous requests
-pub struct USBTransferIsoc {
-    pub dir: USBTransferDirection,
-    pub txn_id: String,
-    pub buf: Vec<u8>,
-    pub num_packets: usize,
-
-    #[cfg(target_os = "macos")]
-    _macos_frames: Box<[IOUSBIsocFrame]>,
-    #[cfg(target_os = "macos")]
-    _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
-}
-
 /// State regarding each interface
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct USBInterfaceState {
@@ -1142,28 +1128,12 @@ impl USBDevice {
             buf
         );
 
-        let macos_isoc_frames = pkt_len
-            .iter()
-            .map(|x| IOUSBIsocFrame {
-                frStatus: 0,
-                frReqCount: *x as u16,
-                frActCount: 0,
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
-        let xfer = Box::new(USBTransferIsoc {
-            dir,
-            txn_id: txn_id.to_owned(),
-            buf,
-            num_packets: pkt_len.len(),
-            _macos_frames: macos_isoc_frames,
-            _macos_iface: self._macos_ifaces[*macos_idx].clone(),
-        });
-
+        let iface2 = self._macos_ifaces[*macos_idx].clone();
         let mut mac_iface_obj = (*self._macos_ifaces[*macos_idx]).borrow_mut();
 
-        if let Err(ret) = mac_iface_obj.isoc_xfer(xfer, *macos_piperef, total_len) {
+        if let Err(ret) =
+            mac_iface_obj.isoc_xfer(iface2, txn_id, buf, *macos_piperef, pkt_len, total_len, dir)
+        {
             log::warn!(
                 "Read/WriteIsocPipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
                 ep,
@@ -2075,75 +2045,6 @@ impl USBStubEngine {
         }
 
         // n.b. the xfer will now be deallocated automagically
-    }
-
-    #[cfg(target_os = "macos")]
-    extern "C" fn iokit_usb_completion_isoc(
-        refcon: *const (),
-        result: libc::kern_return_t,
-        _arg0: *const (),
-    ) {
-        // Recover ownership of the transfer
-        // SAFETY: This was previously allocated via Box
-        let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransferIsoc) };
-
-        let mut had_unwanted_error = false;
-
-        let mut pkt_status = Vec::with_capacity(xfer.num_packets);
-        let mut pkt_lens = Vec::with_capacity(xfer.num_packets);
-        let mut total_len = 0;
-        for i in 0..xfer.num_packets {
-            pkt_status.push(match xfer._macos_frames[i].frStatus {
-                0 => protocol::IsocPacketState::Ok,
-                #[allow(non_upper_case_globals)]
-                kIOReturnOverrun => protocol::IsocPacketState::Babble,
-                _ => {
-                    had_unwanted_error = true;
-                    protocol::IsocPacketState::Error
-                }
-            });
-            pkt_lens.push(xfer._macos_frames[i].frActCount as u32);
-            total_len += xfer._macos_frames[i].frActCount as usize;
-        }
-        let data = if xfer.dir == USBTransferDirection::DeviceToHost {
-            // Update the size of received data
-            unsafe {
-                xfer.buf.set_len(total_len);
-            }
-            Some(URL_SAFE_NO_PAD.encode(&xfer.buf))
-        } else {
-            None
-        };
-
-        log::debug!(
-            "isoc request {} finished, err {:08x}, buf {:02x?} status {:08x?} len {:?}",
-            xfer.txn_id,
-            result,
-            xfer.buf,
-            pkt_status,
-            pkt_lens,
-        );
-
-        if had_unwanted_error || (result != 0 && result != kIOReturnOverrun) {
-            // An error, of a type we don't "tolerate"
-            let notif = protocol::ResponseMessage::RequestError {
-                txn_id: xfer.txn_id,
-                error: protocol::Errors::TransferError,
-                bytes_written: total_len as u64,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        } else {
-            // Success
-            let notif = protocol::ResponseMessage::IsocRequestComplete {
-                txn_id: xfer.txn_id,
-                data,
-                pkt_status,
-                pkt_len: pkt_lens,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        }
     }
 }
 impl Drop for USBStubEngine {
