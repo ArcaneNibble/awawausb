@@ -240,18 +240,27 @@ impl IOUSBDeviceStruct {
 
     pub fn ctrl_xfer(
         &mut self,
-        mut xfer_obj: crate::USBTransfer,
+        txn_id: &str,
+        mut buf: Vec<u8>,
         request_type: u8,
         request: u8,
         value: u16,
         index: u16,
         length: u16,
         timeout: u32,
+        dir: crate::USBTransferDirection,
     ) -> Result<(), kern_return_t> {
+        assert!(length as usize <= buf.capacity());
+
         // Prepare our object, which is a Box on the heap so that it doesn't move
-        assert!(length as usize <= xfer_obj.buf.capacity());
-        let buf_ptr = xfer_obj.buf.as_mut_ptr();
-        let xfer_ptr = Box::into_raw(Box::new(xfer_obj));
+        let buf_ptr = buf.as_mut_ptr();
+        let xfer = USBTransfer {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            _macos_iface: None,
+        };
+        let xfer_ptr = Box::into_raw(Box::new(xfer));
 
         // Prepare OS transfer object
         let req = IOUSBDevRequestTO {
@@ -271,7 +280,7 @@ impl IOUSBDeviceStruct {
             ((**self.0).DeviceRequestAsyncTO)(
                 self.0 as *const (),
                 &req,
-                crate::USBStubEngine::iokit_usb_completion,
+                iokit_usb_completion,
                 xfer_ptr as *const (),
             )
         };
@@ -300,17 +309,39 @@ pub struct PipeProperties {
     interval: u8,
 }
 
+/// A USB transfer which is currently in-flight
+///
+/// This would usually be called an "URB" (USB Request Block).
+///
+/// When the transfer has been submitted, this struct is "owned by"
+/// the operating system. We reclaim ownership when we get a completion.
 #[derive(Debug)]
+pub struct USBTransfer {
+    pub dir: crate::USBTransferDirection,
+    pub txn_id: String,
+    /// The payload buffer
+    ///
+    /// If sending data _to_ the device, this buffer contains the data.
+    /// If receiving data _from_ the device, this buffer must have
+    /// a capacity large enough to hold the desired length.
+    ///
+    /// The kernel _may write_ to this buffer during the time we've
+    /// given up ownership
+    pub buf: Vec<u8>,
+
+    #[cfg(target_os = "macos")]
+    _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
+}
+
 /// A USB transfer's metadata, specifically for isochronous requests
+#[derive(Debug)]
 pub struct USBTransferIsoc {
     pub dir: crate::USBTransferDirection,
     pub txn_id: String,
     pub buf: Vec<u8>,
     pub num_packets: usize,
 
-    #[cfg(target_os = "macos")]
     _macos_frames: Box<[IOUSBIsocFrame]>,
-    #[cfg(target_os = "macos")]
     _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
 }
 
@@ -443,15 +474,25 @@ impl IOUSBInterfaceStruct {
 
     pub fn data_xfer(
         &mut self,
-        mut xfer_obj: crate::USBTransfer,
+        self2: Rc<RefCell<Self>>,
+        txn_id: &str,
+        mut buf: Vec<u8>,
         pipe_ref: u8,
         length: u32,
+        dir: crate::USBTransferDirection,
     ) -> Result<(), kern_return_t> {
+        assert!(length as usize <= buf.capacity());
+        assert_eq!(self as *mut _, self2.as_ptr());
+
         // Prepare our object, which is a Box on the heap so that it doesn't move
-        assert!(length as usize <= xfer_obj.buf.capacity());
-        let buf_ptr = xfer_obj.buf.as_mut_ptr();
-        let dir = xfer_obj.dir;
-        let xfer_ptr = Box::into_raw(Box::new(xfer_obj));
+        let buf_ptr = buf.as_mut_ptr();
+        let xfer = USBTransfer {
+            dir,
+            txn_id: txn_id.to_owned(),
+            buf,
+            _macos_iface: Some(self2),
+        };
+        let xfer_ptr = Box::into_raw(Box::new(xfer));
 
         let ret = match dir {
             crate::USBTransferDirection::HostToDevice => unsafe {
@@ -460,7 +501,7 @@ impl IOUSBInterfaceStruct {
                     pipe_ref,
                     buf_ptr as *const (),
                     length,
-                    crate::USBStubEngine::iokit_usb_completion,
+                    iokit_usb_completion,
                     xfer_ptr as *const (),
                 )
             },
@@ -470,7 +511,7 @@ impl IOUSBInterfaceStruct {
                     pipe_ref,
                     buf_ptr as *mut (),
                     length,
-                    crate::USBStubEngine::iokit_usb_completion,
+                    iokit_usb_completion,
                     xfer_ptr as *const (),
                 )
             },
@@ -578,7 +619,67 @@ impl Drop for IOUSBInterfaceStruct {
     }
 }
 
-#[cfg(target_os = "macos")]
+extern "C" fn iokit_usb_completion(
+    refcon: *const (),
+    result: libc::kern_return_t,
+    arg0: *const (),
+) {
+    // Recover ownership of the transfer
+    // SAFETY: This was previously allocated via Box
+    let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransfer) };
+
+    let actual_len = arg0 as usize;
+    if xfer.dir == crate::USBTransferDirection::DeviceToHost {
+        // Update the size of received data
+        unsafe {
+            xfer.buf.set_len(actual_len);
+        }
+    }
+
+    log::debug!(
+        "request {} finished, err {:08x}, buf {:02x?}",
+        xfer.txn_id,
+        result,
+        xfer.buf
+    );
+
+    // Send notification
+    if result == kIOUSBPipeStalled {
+        let notif = crate::protocol::ResponseMessage::RequestError {
+            txn_id: xfer.txn_id,
+            error: crate::protocol::Errors::Stall,
+            bytes_written: actual_len as u64,
+        };
+        let notif = serde_json::to_string(&notif).unwrap();
+        crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+    } else if result == 0 || result == kIOReturnOverrun {
+        let babble = result == kIOReturnOverrun;
+        let data = if xfer.dir == crate::USBTransferDirection::DeviceToHost {
+            Some(URL_SAFE_NO_PAD.encode(&xfer.buf))
+        } else {
+            None
+        };
+        let notif = crate::protocol::ResponseMessage::RequestComplete {
+            txn_id: xfer.txn_id,
+            babble,
+            data,
+            bytes_written: actual_len as u64,
+        };
+        let notif = serde_json::to_string(&notif).unwrap();
+        crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+    } else {
+        let notif = crate::protocol::ResponseMessage::RequestError {
+            txn_id: xfer.txn_id,
+            error: crate::protocol::Errors::TransferError,
+            bytes_written: actual_len as u64,
+        };
+        let notif = serde_json::to_string(&notif).unwrap();
+        crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+    }
+
+    // n.b. the xfer will now be deallocated automagically
+}
+
 extern "C" fn iokit_usb_completion_isoc(
     refcon: *const (),
     result: libc::kern_return_t,

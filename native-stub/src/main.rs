@@ -49,30 +49,6 @@ pub enum USBTransferDirection {
     DeviceToHost,
 }
 
-/// A USB transfer which is currently in-flight
-///
-/// This would usually be called an "URB" (USB Request Block).
-///
-/// When the transfer has been submitted, this struct is "owned by"
-/// the operating system. We reclaim ownership when we get a completion.
-#[derive(Debug)]
-pub struct USBTransfer {
-    pub dir: USBTransferDirection,
-    pub txn_id: String,
-    /// The payload buffer
-    ///
-    /// If sending data _to_ the device, this buffer contains the data.
-    /// If receiving data _from_ the device, this buffer must have
-    /// a capacity large enough to hold the desired length.
-    ///
-    /// The kernel _may write_ to this buffer during the time we've
-    /// given up ownership
-    pub buf: Vec<u8>,
-
-    #[cfg(target_os = "macos")]
-    _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
-}
-
 /// State regarding each interface
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct USBInterfaceState {
@@ -137,108 +113,6 @@ pub struct USBDevice {
     _macos_ifaces: Vec<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 impl USBDevice {
-    #[cfg(target_os = "macos")]
-    #[allow(non_snake_case)]
-    pub fn setup(
-        obj: io_object_t,
-        sessionid: u64,
-        engine: Pin<&USBStubEngine>,
-    ) -> Result<(), libc::kern_return_t> {
-        // These are available in IOKit, but not on the interface API.
-        // None of these gets (here or below) should ever fail on versions of macOS we support
-        // (but, as a hack, we ignore failures here to avoid leaking the object).
-        let bcdUSB = get_bcd_usb(obj).unwrap_or_default();
-        let bMaxPacketSize0 = get_max_pkt_0(obj).unwrap_or_default();
-
-        let str_manuf = get_usb_cached_string(obj, "USB Vendor Name");
-        let str_product = get_usb_cached_string(obj, "USB Product Name");
-        let str_sn = get_usb_cached_string(obj, "USB Serial Number");
-
-        // Ownership is actually converted here
-        let mut usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
-
-        // Create async event notification
-        let mach_port = usb_dev.CreateDeviceAsyncPort()?;
-        engine.add_mach_port(mach_port).map_err(|_| 0)?; // FIXME
-        usb_dev.1 = &engine.actual_needed_event_sz;
-
-        // Get device descriptor fields
-        let bDeviceClass = usb_dev.GetDeviceClass()?;
-        let bDeviceSubClass = usb_dev.GetDeviceSubClass()?;
-        let bDeviceProtocol = usb_dev.GetDeviceProtocol()?;
-        let idVendor = usb_dev.GetDeviceVendor()?;
-        let idProduct = usb_dev.GetDeviceProduct()?;
-        let bcdDevice = usb_dev.GetDeviceReleaseNumber()?;
-        let iManufacturer = usb_dev.USBGetManufacturerStringIndex()?;
-        let iProduct = usb_dev.USBGetProductStringIndex()?;
-        let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex()?;
-        let bNumConfigurations = usb_dev.GetNumberOfConfigurations()?;
-
-        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor {
-            bLength: std::mem::size_of::<usb_ch9::ch9_core::DeviceDescriptor>() as u8,
-            bDescriptorType: usb_ch9::ch9_core::descriptor_types::DEVICE,
-            bcdUSB,
-            bDeviceClass,
-            bDeviceSubClass,
-            bDeviceProtocol,
-            bMaxPacketSize0,
-            idVendor,
-            idProduct,
-            bcdDevice,
-            iManufacturer,
-            iProduct,
-            iSerialNumber,
-            bNumConfigurations,
-        };
-
-        // Get configuration descriptors
-        let mut config_descs = Vec::new();
-        for i in 0..bNumConfigurations {
-            let conf_desc = usb_dev.GetConfigurationDescriptorPtr(i)?;
-
-            // SAFETY: We read the initial configuration descriptor and then use its length
-            // (which is what everybody just has to do here)
-            let cfg_desc_initial = conf_desc as *const usb_ch9::ch9_core::ConfigDescriptor;
-            let total_desc_len = unsafe { (*cfg_desc_initial).wTotalLength as usize };
-            let config_desc =
-                unsafe { std::slice::from_raw_parts(conf_desc as *const u8, total_desc_len) };
-
-            config_descs.push(config_desc.to_owned());
-        }
-
-        // Get current state
-        // TODO: Does this generate unnecessary wakes and/or bus traffic?
-        let current_config = usb_dev.GetConfiguration()?;
-
-        let mut dev = USBDevice {
-            device_descriptor: dev_desc,
-            config_descriptors: config_descs,
-            vendor_name: str_manuf,
-            product_name: str_product,
-            serial_number: str_sn,
-
-            reformatted_config_descriptors: Vec::new(),
-            ep_to_idx: HashMap::new(),
-
-            opened: false,
-            current_configuration_id: current_config,
-            current_if_state: HashMap::new(),
-
-            _macos_ep_to_idx: HashMap::new(),
-            _macos_dev: usb_dev,
-            _macos_ifaces: Vec::new(),
-        };
-
-        // Open a handle to all the interfaces
-        dev.macos_probe_ifaces(engine)?;
-        dev.reformat_config_descriptors();
-
-        // At the *very* end, we can send this
-        dev.send_plug_notification(sessionid, engine);
-
-        Ok(())
-    }
-
     /// Send a device plug-in notification, while also stashing ourselves into the engine
     pub fn send_plug_notification(self, sessionid: u64, engine: Pin<&USBStubEngine>) {
         let notif = protocol::ResponseMessage::NewDevice {
@@ -540,6 +414,107 @@ impl USBDevice {
 
 #[cfg(target_os = "macos")]
 impl USBDevice {
+    #[allow(non_snake_case)]
+    pub fn setup(
+        obj: io_object_t,
+        sessionid: u64,
+        engine: Pin<&USBStubEngine>,
+    ) -> Result<(), libc::kern_return_t> {
+        // These are available in IOKit, but not on the interface API.
+        // None of these gets (here or below) should ever fail on versions of macOS we support
+        // (but, as a hack, we ignore failures here to avoid leaking the object).
+        let bcdUSB = get_bcd_usb(obj).unwrap_or_default();
+        let bMaxPacketSize0 = get_max_pkt_0(obj).unwrap_or_default();
+
+        let str_manuf = get_usb_cached_string(obj, "USB Vendor Name");
+        let str_product = get_usb_cached_string(obj, "USB Product Name");
+        let str_sn = get_usb_cached_string(obj, "USB Serial Number");
+
+        // Ownership is actually converted here
+        let mut usb_dev = unsafe { IOUSBDeviceStruct::new(obj) };
+
+        // Create async event notification
+        let mach_port = usb_dev.CreateDeviceAsyncPort()?;
+        engine.add_mach_port(mach_port).map_err(|_| 0)?; // FIXME
+        usb_dev.1 = &engine.actual_needed_event_sz;
+
+        // Get device descriptor fields
+        let bDeviceClass = usb_dev.GetDeviceClass()?;
+        let bDeviceSubClass = usb_dev.GetDeviceSubClass()?;
+        let bDeviceProtocol = usb_dev.GetDeviceProtocol()?;
+        let idVendor = usb_dev.GetDeviceVendor()?;
+        let idProduct = usb_dev.GetDeviceProduct()?;
+        let bcdDevice = usb_dev.GetDeviceReleaseNumber()?;
+        let iManufacturer = usb_dev.USBGetManufacturerStringIndex()?;
+        let iProduct = usb_dev.USBGetProductStringIndex()?;
+        let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex()?;
+        let bNumConfigurations = usb_dev.GetNumberOfConfigurations()?;
+
+        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor {
+            bLength: std::mem::size_of::<usb_ch9::ch9_core::DeviceDescriptor>() as u8,
+            bDescriptorType: usb_ch9::ch9_core::descriptor_types::DEVICE,
+            bcdUSB,
+            bDeviceClass,
+            bDeviceSubClass,
+            bDeviceProtocol,
+            bMaxPacketSize0,
+            idVendor,
+            idProduct,
+            bcdDevice,
+            iManufacturer,
+            iProduct,
+            iSerialNumber,
+            bNumConfigurations,
+        };
+
+        // Get configuration descriptors
+        let mut config_descs = Vec::new();
+        for i in 0..bNumConfigurations {
+            let conf_desc = usb_dev.GetConfigurationDescriptorPtr(i)?;
+
+            // SAFETY: We read the initial configuration descriptor and then use its length
+            // (which is what everybody just has to do here)
+            let cfg_desc_initial = conf_desc as *const usb_ch9::ch9_core::ConfigDescriptor;
+            let total_desc_len = unsafe { (*cfg_desc_initial).wTotalLength as usize };
+            let config_desc =
+                unsafe { std::slice::from_raw_parts(conf_desc as *const u8, total_desc_len) };
+
+            config_descs.push(config_desc.to_owned());
+        }
+
+        // Get current state
+        // TODO: Does this generate unnecessary wakes and/or bus traffic?
+        let current_config = usb_dev.GetConfiguration()?;
+
+        let mut dev = USBDevice {
+            device_descriptor: dev_desc,
+            config_descriptors: config_descs,
+            vendor_name: str_manuf,
+            product_name: str_product,
+            serial_number: str_sn,
+
+            reformatted_config_descriptors: Vec::new(),
+            ep_to_idx: HashMap::new(),
+
+            opened: false,
+            current_configuration_id: current_config,
+            current_if_state: HashMap::new(),
+
+            _macos_ep_to_idx: HashMap::new(),
+            _macos_dev: usb_dev,
+            _macos_ifaces: Vec::new(),
+        };
+
+        // Open a handle to all the interfaces
+        dev.macos_probe_ifaces(engine)?;
+        dev.reformat_config_descriptors();
+
+        // At the *very* end, we can send this
+        dev.send_plug_notification(sessionid, engine);
+
+        Ok(())
+    }
+
     /// Open or re-open all interface handles, when switching configuration
     pub(crate) fn macos_probe_ifaces(
         &mut self,
@@ -962,21 +937,16 @@ impl USBDevice {
             buf
         );
 
-        let xfer = USBTransfer {
-            dir,
-            txn_id: txn_id.to_owned(),
-            buf,
-            _macos_iface: None,
-        };
-
         if let Err(ret) = self._macos_dev.ctrl_xfer(
-            xfer,
+            txn_id,
+            buf,
             request_type,
             request,
             value,
             index,
             len as u16,
             timeout as u32,
+            dir,
         ) {
             // NOTE: A removed device doesn't seem to generate errors here
             log::warn!(
@@ -1027,15 +997,11 @@ impl USBDevice {
             buf
         );
 
-        let xfer = USBTransfer {
-            dir,
-            txn_id: txn_id.to_owned(),
-            buf,
-            _macos_iface: Some(self._macos_ifaces[*macos_idx].clone()),
-        };
-
+        let iface2 = self._macos_ifaces[*macos_idx].clone();
         let mut mac_iface_obj = (*self._macos_ifaces[*macos_idx]).borrow_mut();
-        if let Err(ret) = mac_iface_obj.data_xfer(xfer, *macos_piperef, len as u32) {
+        if let Err(ret) =
+            mac_iface_obj.data_xfer(iface2, txn_id, buf, *macos_piperef, len as u32, dir)
+        {
             log::warn!(
                 "Read/WritePipeAsync failed ep 0x{:02x}, sid = {}, txn = {}, ret = {:08x} ",
                 ep,
@@ -1983,68 +1949,6 @@ impl USBStubEngine {
         self.actual_needed_event_sz.update(|x| x + 1);
 
         Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    extern "C" fn iokit_usb_completion(
-        refcon: *const (),
-        result: libc::kern_return_t,
-        arg0: *const (),
-    ) {
-        // Recover ownership of the transfer
-        // SAFETY: This was previously allocated via Box
-        let mut xfer = unsafe { Box::from_raw(refcon as *mut USBTransfer) };
-
-        let actual_len = arg0 as usize;
-        if xfer.dir == USBTransferDirection::DeviceToHost {
-            // Update the size of received data
-            unsafe {
-                xfer.buf.set_len(actual_len);
-            }
-        }
-
-        log::debug!(
-            "request {} finished, err {:08x}, buf {:02x?}",
-            xfer.txn_id,
-            result,
-            xfer.buf
-        );
-
-        // Send notification
-        if result == kIOUSBPipeStalled {
-            let notif = protocol::ResponseMessage::RequestError {
-                txn_id: xfer.txn_id,
-                error: protocol::Errors::Stall,
-                bytes_written: actual_len as u64,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        } else if result == 0 || result == kIOReturnOverrun {
-            let babble = result == kIOReturnOverrun;
-            let data = if xfer.dir == USBTransferDirection::DeviceToHost {
-                Some(URL_SAFE_NO_PAD.encode(&xfer.buf))
-            } else {
-                None
-            };
-            let notif = protocol::ResponseMessage::RequestComplete {
-                txn_id: xfer.txn_id,
-                babble,
-                data,
-                bytes_written: actual_len as u64,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        } else {
-            let notif = protocol::ResponseMessage::RequestError {
-                txn_id: xfer.txn_id,
-                error: protocol::Errors::TransferError,
-                bytes_written: actual_len as u64,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        }
-
-        // n.b. the xfer will now be deallocated automagically
     }
 }
 impl Drop for USBStubEngine {
