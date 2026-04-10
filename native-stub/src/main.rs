@@ -471,13 +471,42 @@ impl USBDevice {
     fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
         self._check_open()?;
 
-        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
-        todo!()
+        log::debug!(
+            "device close (by releasing interfaces), sid = {}, txn = {}",
+            sid,
+            txn_id
+        );
+
+        let claimed_ifs = self.current_if_state.keys().map(|x| *x).collect::<Vec<_>>();
+        for iface in claimed_ifs {
+            self.release_interface(sid, txn_id, iface)?;
+        }
+        self.opened = false;
+        Ok(DeviceOpResult::SendCompletionNow)
     }
 
     fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        log::debug!("device reset, sid = {}, txn = {}", sid, txn_id);
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IO(b'U' as u32, 20),
+            )
+        };
+        if ret != 0 {
+            log::warn!(
+                "device reset failed, sid = {}, txn = {}, err = {} ",
+                sid,
+                txn_id,
+                io::Error::last_os_error()
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Reset successful
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn set_configuration(
