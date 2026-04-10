@@ -44,7 +44,6 @@ pub struct usbdevfs_disconnect_claim {
 
 pub const USBDEVFS_URB_ISO_ASAP: u32 = 0x02;
 pub const USBDEVFS_URB_TYPE_ISO: u8 = 0;
-pub const USBDEVFS_URB_TYPE_INTERRUPT: u8 = 1;
 pub const USBDEVFS_URB_TYPE_CONTROL: u8 = 2;
 pub const USBDEVFS_URB_TYPE_BULK: u8 = 3;
 

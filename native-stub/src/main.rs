@@ -739,6 +739,24 @@ impl USBDevice {
             if !iface_state.claimed {
                 return Err(protocol::Errors::InvalidState);
             }
+        } else if request_type & 0b11111 == 2 {
+            // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
+            self._check_open()?;
+            if index > 0xff {
+                return Err(protocol::Errors::InvalidNumber);
+            }
+            let ep = index as u8;
+            let iface = self
+                .ep_to_idx
+                .get(&ep)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
         }
 
         log::debug!(
@@ -816,10 +834,78 @@ impl USBDevice {
         dir: USBTransferDirection,
         ep: u8,
         len: u32,
-        buf: Vec<u8>,
+        mut buf: Vec<u8>,
     ) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "bulk/interrupt transfer, sid = {}, txn = {}, {:02x} {:08x} {:02x?}",
+            sid,
+            txn_id,
+            ep,
+            len,
+            buf
+        );
+
+        assert!(buf.capacity() >= len as usize);
+        let urb = Box::new(usbdevfs_urb {
+            // The Linux kernel permits sending bulk URBs at interrupt endpoints
+            // We rely on this hack so that we don't have to bother looking up what the actual type is
+            type_: USBDEVFS_URB_TYPE_BULK,
+            endpoint: ep,
+            status: 0,
+            flags: 0,
+            buffer: buf.as_mut_ptr() as *mut (),
+            buffer_length: len as i32,
+            actual_length: 0,
+            start_frame: 0,
+            number_of_packets: 0,
+            error_count: 0,
+            signr: 0,
+            usercontext: ptr::null_mut(),
+        });
+        let urb_ptr = &*urb as *const usbdevfs_urb;
+
+        let mut urbwrapper = Box::new(LinuxURBWrapper {
+            txn_id: txn_id.to_owned(),
+            dir,
+            buf,
+            urb,
+            _handles_rc: self._linux_handles.clone(),
+        });
+        urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
+        let _urbwrapper = Box::into_raw(urbwrapper);
+
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
+                urb_ptr,
+            )
+        };
+        if ret == 0 {
+            Ok(DeviceOpResult::ManualCompletion)
+        } else {
+            log::warn!(
+                "SUBMITURB failed, sid = {}, txn = {}, err = {}",
+                sid,
+                txn_id,
+                io::Error::last_os_error()
+            );
+            Err(protocol::Errors::TransferError)
+        }
     }
 
     fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
