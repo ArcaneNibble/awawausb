@@ -363,11 +363,28 @@ impl USBDevice {
         };
 
         // Get extra data
-        let manufacturer = read_entire_sysfs_file(sysfs_dirfd, c"manufacturer")?;
+        let mut manufacturer = read_entire_sysfs_file(sysfs_dirfd, c"manufacturer")?;
+        if let Some(x) = manufacturer.as_mut() {
+            if x.last() == Some(&b'\n') {
+                x.pop();
+            }
+        }
         let manufacturer = manufacturer.map(|x| String::from_utf8_lossy(&x).to_string());
-        let product = read_entire_sysfs_file(sysfs_dirfd, c"product")?;
+
+        let mut product = read_entire_sysfs_file(sysfs_dirfd, c"product")?;
+        if let Some(x) = product.as_mut() {
+            if x.last() == Some(&b'\n') {
+                x.pop();
+            }
+        }
         let product = product.map(|x| String::from_utf8_lossy(&x).to_string());
-        let serial = read_entire_sysfs_file(sysfs_dirfd, c"serial")?;
+
+        let mut serial = read_entire_sysfs_file(sysfs_dirfd, c"serial")?;
+        if let Some(x) = serial.as_mut() {
+            if x.last() == Some(&b'\n') {
+                x.pop();
+            }
+        }
         let serial = serial.map(|x| String::from_utf8_lossy(&x).to_string());
 
         // Just try to get the current config, goddamit
@@ -468,10 +485,48 @@ impl USBDevice {
         sid: u64,
         txn_id: &str,
         value: u8,
-        engine: Pin<&USBStubEngine>,
+        _engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        log::debug!(
+            "device set config 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+
+        let config = value as u32;
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<u32>(b'U' as u32, 5),
+                &config,
+            )
+        };
+        if ret != 0 {
+            log::warn!(
+                "SET_CONFIGURATION failed, sid = {}, txn = {}, err = {} ",
+                sid,
+                txn_id,
+                io::Error::last_os_error(),
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Set config successful
+            self.current_configuration_id = value;
+            if let Err(err) = self.linux_probe_ifaces() {
+                log::warn!(
+                    "SET_CONFIGURATION failed reprobing interfaces, sid = {}, txn = {}, err = {} ",
+                    sid,
+                    txn_id,
+                    err,
+                );
+                Err(protocol::Errors::TransferError)
+            } else {
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+        }
     }
 
     fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
