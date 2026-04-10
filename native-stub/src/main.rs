@@ -282,16 +282,6 @@ impl USBDevice {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug)]
-struct LinuxURBWrapper {
-    txn_id: String,
-    dir: USBTransferDirection,
-    buf: Vec<u8>,
-    urb: Box<usbdevfs_urb>,
-    _handles_rc: Rc<RefCell<LinuxHandles>>,
-}
-
-#[cfg(target_os = "linux")]
 impl USBDevice {
     pub fn setup(
         dev_usb_path: &Path,
@@ -2045,7 +2035,7 @@ impl USBStubEngine {
                                 // SAFETY: Need to make sure this matches up with how we queue URBs
                                 let mut ret = Box::from_raw(wrapped_ptr);
                                 if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
-                                    // Linux reports the control transfer length, but doesn't remove the setup packet
+                                    // Linux reports the control transfer length, but doesn't include/remove the setup packet
                                     ret.buf.set_len(8 + ret.urb.actual_length as usize);
                                 } else {
                                     ret.buf.set_len(ret.urb.actual_length as usize);
@@ -2053,53 +2043,7 @@ impl USBStubEngine {
                                 ret
                             };
 
-                            log::debug!(
-                                "request {} finished, status {}, buf {:02x?}",
-                                urb.txn_id,
-                                urb.urb.status,
-                                urb.buf,
-                            );
-
-                            // Send notification
-                            if urb.urb.status == -libc::EPIPE {
-                                let notif = crate::protocol::ResponseMessage::RequestError {
-                                    txn_id: urb.txn_id,
-                                    error: crate::protocol::Errors::Stall,
-                                    bytes_written: urb.urb.actual_length as u64,
-                                };
-                                let notif = serde_json::to_string(&notif).unwrap();
-                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
-                                    .expect("failed to write stdout");
-                            } else if urb.urb.status == 0 || urb.urb.status == -libc::EOVERFLOW {
-                                let babble = urb.urb.status == -libc::EOVERFLOW;
-                                let data = if urb.dir == crate::USBTransferDirection::DeviceToHost {
-                                    if urb.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
-                                        Some(URL_SAFE_NO_PAD.encode(&urb.buf[8..]))
-                                    } else {
-                                        Some(URL_SAFE_NO_PAD.encode(&urb.buf))
-                                    }
-                                } else {
-                                    None
-                                };
-                                let notif = crate::protocol::ResponseMessage::RequestComplete {
-                                    txn_id: urb.txn_id,
-                                    babble,
-                                    data,
-                                    bytes_written: urb.urb.actual_length as u64,
-                                };
-                                let notif = serde_json::to_string(&notif).unwrap();
-                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
-                                    .expect("failed to write stdout");
-                            } else {
-                                let notif = crate::protocol::ResponseMessage::RequestError {
-                                    txn_id: urb.txn_id,
-                                    error: crate::protocol::Errors::TransferError,
-                                    bytes_written: urb.urb.actual_length as u64,
-                                };
-                                let notif = serde_json::to_string(&notif).unwrap();
-                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
-                                    .expect("failed to write stdout");
-                            }
+                            urb.notify_completion();
                         }
                     }
                     if evt.events & (libc::EPOLLHUP as u32) != 0 {

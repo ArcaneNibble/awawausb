@@ -1,10 +1,14 @@
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::FromRawFd;
 use std::ptr;
+use std::rc::Rc;
+
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub fn read_entire_sysfs_file(dirfd: i32, filename: &CStr) -> io::Result<Option<Vec<u8>>> {
     let filefd =
@@ -181,6 +185,63 @@ impl Drop for LinuxHandles {
                 let needed_events = &*self.decr_event_count;
                 needed_events.update(|x| x - 1);
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LinuxURBWrapper {
+    pub txn_id: String,
+    pub dir: crate::USBTransferDirection,
+    pub buf: Vec<u8>,
+    pub urb: Box<usbdevfs_urb>,
+    pub _handles_rc: Rc<RefCell<LinuxHandles>>,
+}
+impl LinuxURBWrapper {
+    pub fn notify_completion(self) {
+        log::debug!(
+            "request {} finished, status {}, buf {:02x?}",
+            self.txn_id,
+            self.urb.status,
+            self.buf,
+        );
+
+        // Send notification
+        if self.urb.status == -libc::EPIPE {
+            let notif = crate::protocol::ResponseMessage::RequestError {
+                txn_id: self.txn_id,
+                error: crate::protocol::Errors::Stall,
+                bytes_written: self.urb.actual_length as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        } else if self.urb.status == 0 || self.urb.status == -libc::EOVERFLOW {
+            let babble = self.urb.status == -libc::EOVERFLOW;
+            let data = if self.dir == crate::USBTransferDirection::DeviceToHost {
+                if self.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
+                    Some(URL_SAFE_NO_PAD.encode(&self.buf[8..]))
+                } else {
+                    Some(URL_SAFE_NO_PAD.encode(&self.buf))
+                }
+            } else {
+                None
+            };
+            let notif = crate::protocol::ResponseMessage::RequestComplete {
+                txn_id: self.txn_id,
+                babble,
+                data,
+                bytes_written: self.urb.actual_length as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        } else {
+            let notif = crate::protocol::ResponseMessage::RequestError {
+                txn_id: self.txn_id,
+                error: crate::protocol::Errors::TransferError,
+                bytes_written: self.urb.actual_length as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
         }
     }
 }
