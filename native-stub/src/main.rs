@@ -636,7 +636,51 @@ impl USBDevice {
 
     fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device set alt interface 0x{:02x} 0x{:02x}, sid = {}, txn = {}",
+            iface,
+            alt,
+            sid,
+            txn_id
+        );
+
+        let set_alt_struct = usbdevfs_setinterface {
+            interface: iface as u32,
+            altsetting: alt as u32,
+        };
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<usbdevfs_setinterface>(b'U' as u32, 4),
+                &set_alt_struct,
+            )
+        };
+        if ret != 0 {
+            // let mut mac_iface_obj = (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
+            // if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
+            log::warn!(
+                "SET_INTERFACE failed {} = {:02x}, sid = {}, txn = {}, err = {} ",
+                iface,
+                alt,
+                sid,
+                txn_id,
+                io::Error::last_os_error()
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Set alt interface successful
+            iface_state.alt_setting = alt;
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn ctrl_xfer(
