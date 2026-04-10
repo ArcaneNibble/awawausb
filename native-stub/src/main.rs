@@ -954,10 +954,72 @@ impl USBDevice {
         ep: u8,
         total_len: usize,
         pkt_len: Vec<u32>,
-        buf: Vec<u8>,
+        mut buf: Vec<u8>,
     ) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "isoc transfer, sid = {}, txn = {}, {:02x} {:08x} {:?} {:02x?}",
+            sid,
+            txn_id,
+            ep,
+            total_len,
+            pkt_len,
+            buf
+        );
+
+        assert!(total_len <= buf.capacity());
+        let mut urb = usbdevfs_urb_with_iso::new(pkt_len.len());
+        urb.urb.type_ = USBDEVFS_URB_TYPE_ISO;
+        urb.urb.endpoint = ep;
+        urb.urb.flags = USBDEVFS_URB_ISO_ASAP;
+        urb.urb.buffer = buf.as_mut_ptr() as *mut ();
+        urb.urb.number_of_packets = pkt_len.len() as i32;
+        for (i, &pkt_len_i) in pkt_len.iter().enumerate() {
+            urb.iso_frame_desc[i].length = pkt_len_i;
+        }
+        let urb_ptr = &*urb as *const usbdevfs_urb_with_iso;
+
+        let mut urbwrapper = Box::new(LinuxIsoURBWrapper {
+            txn_id: txn_id.to_owned(),
+            dir,
+            buf,
+            urb,
+            _handles_rc: self._linux_handles.clone(),
+        });
+        urbwrapper.urb.urb.usercontext = &*urbwrapper as *const LinuxIsoURBWrapper as *mut ();
+        let _urbwrapper = Box::into_raw(urbwrapper);
+
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
+                urb_ptr,
+            )
+        };
+        if ret == 0 {
+            Ok(DeviceOpResult::ManualCompletion)
+        } else {
+            log::warn!(
+                "SUBMITURB failed, sid = {}, txn = {}, err = {}",
+                sid,
+                txn_id,
+                io::Error::last_os_error()
+            );
+            Err(protocol::Errors::TransferError)
+        }
     }
 }
 
@@ -2136,7 +2198,12 @@ impl USBStubEngine {
                 // Deal with data size limits
                 let mut total_len = 0;
                 let num_pkts = pkt_len.len();
+                #[cfg(target_os = "macos")]
                 if num_pkts > u32::MAX as usize {
+                    return Err(protocol::Errors::RequestTooBig);
+                }
+                #[cfg(target_os = "linux")]
+                if num_pkts > i32::MAX as usize {
                     return Err(protocol::Errors::RequestTooBig);
                 }
                 for l in &pkt_len {
@@ -2386,20 +2453,35 @@ impl USBStubEngine {
                                 }
                                 break;
                             }
-                            let urb = unsafe {
-                                let wrapped_ptr = (*urb).usercontext as *mut LinuxURBWrapper;
-                                // SAFETY: Need to make sure this matches up with how we queue URBs
-                                let mut ret = Box::from_raw(wrapped_ptr);
-                                if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
-                                    // Linux reports the control transfer length, but doesn't include/remove the setup packet
-                                    ret.buf.set_len(8 + ret.urb.actual_length as usize);
-                                } else {
-                                    ret.buf.set_len(ret.urb.actual_length as usize);
-                                }
-                                ret
-                            };
 
-                            urb.notify_completion();
+                            let is_iso = unsafe { (*urb).type_ == USBDEVFS_URB_TYPE_ISO };
+                            if !is_iso {
+                                let urb = unsafe {
+                                    let wrapped_ptr = (*urb).usercontext as *mut LinuxURBWrapper;
+                                    // SAFETY: Need to make sure this matches up with how we queue URBs
+                                    let mut ret = Box::from_raw(wrapped_ptr);
+                                    if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
+                                        // Linux reports the control transfer length, but doesn't include/remove the setup packet
+                                        ret.buf.set_len(8 + ret.urb.actual_length as usize);
+                                    } else {
+                                        ret.buf.set_len(ret.urb.actual_length as usize);
+                                    }
+                                    ret
+                                };
+
+                                urb.notify_completion();
+                            } else {
+                                let urb = unsafe {
+                                    let wrapped_ptr = (*urb).usercontext as *mut LinuxIsoURBWrapper;
+                                    // SAFETY: Need to make sure this matches up with how we queue URBs
+                                    let mut ret = Box::from_raw(wrapped_ptr);
+                                    ret.buf.set_len(ret.urb.urb.actual_length as usize);
+                                    ret
+                                };
+
+                                dbg!(&urb);
+                                urb.notify_completion();
+                            }
                         }
                     }
                     if evt.events & (libc::EPOLLHUP as u32) != 0 {

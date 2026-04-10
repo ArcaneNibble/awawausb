@@ -1,3 +1,4 @@
+use std::alloc::Layout;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,7 +31,6 @@ pub fn read_entire_sysfs_file(dirfd: i32, filename: &CStr) -> io::Result<Option<
 pub const USBDEVFS_CAP_NO_PACKET_SIZE_LIM: u32 = 0x04;
 pub const USBDEVFS_CAP_REAP_AFTER_DISCONNECT: u32 = 0x10;
 
-pub const USBDEVFS_DISCONNECT_CLAIM_IF_DRIVER: u32 = 0x01;
 pub const USBDEVFS_DISCONNECT_CLAIM_EXCEPT_DRIVER: u32 = 0x02;
 
 #[allow(non_camel_case_types)]
@@ -80,6 +80,36 @@ pub struct usbdevfs_urb {
     pub error_count: i32,
     pub signr: u32,
     pub usercontext: *mut (),
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug)]
+#[repr(C)]
+pub struct usbdevfs_urb_with_iso {
+    pub urb: usbdevfs_urb,
+    pub iso_frame_desc: [usbdevfs_iso_packet_desc],
+}
+impl usbdevfs_urb_with_iso {
+    pub fn new(num_pkts: usize) -> Box<Self> {
+        let urb_layout = Layout::new::<usbdevfs_urb>();
+        let frames_layout = Layout::array::<usbdevfs_iso_packet_desc>(num_pkts).unwrap();
+        let (final_layout, _) = urb_layout.extend(frames_layout).unwrap();
+        let final_layout = final_layout.pad_to_align();
+
+        unsafe {
+            let mem = std::alloc::alloc_zeroed(final_layout);
+            #[repr(C)]
+            struct FatPointer {
+                ptr: *mut u8,
+                sz: usize,
+            }
+            let mem: *mut Self = std::mem::transmute(FatPointer {
+                ptr: mem,
+                sz: num_pkts,
+            });
+            Box::from_raw(mem)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -238,6 +268,73 @@ impl LinuxURBWrapper {
                 txn_id: self.txn_id,
                 error: crate::protocol::Errors::TransferError,
                 bytes_written: self.urb.actual_length as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LinuxIsoURBWrapper {
+    pub txn_id: String,
+    pub dir: crate::USBTransferDirection,
+    pub buf: Vec<u8>,
+    pub urb: Box<usbdevfs_urb_with_iso>,
+    pub _handles_rc: Rc<RefCell<LinuxHandles>>,
+}
+impl LinuxIsoURBWrapper {
+    pub fn notify_completion(self) {
+        let mut had_unwanted_error = false;
+
+        let num_pkts = self.urb.iso_frame_desc.len();
+        let mut pkt_status = Vec::with_capacity(num_pkts);
+        let mut pkt_lens = Vec::with_capacity(num_pkts);
+        for i in 0..num_pkts {
+            pkt_status.push(if self.urb.iso_frame_desc[i].status == 0 {
+                crate::protocol::IsocPacketState::Ok
+            } else if self.urb.iso_frame_desc[i].status == (-libc::EOVERFLOW) as u32 {
+                crate::protocol::IsocPacketState::Babble
+            } else {
+                had_unwanted_error = true;
+                crate::protocol::IsocPacketState::Error
+            });
+            pkt_lens.push(self.urb.iso_frame_desc[i].actual_length as u32);
+        }
+        let data = if self.dir == crate::USBTransferDirection::DeviceToHost {
+            Some(URL_SAFE_NO_PAD.encode(&self.buf))
+        } else {
+            None
+        };
+
+        log::debug!(
+            "isoc request {} finished, status {}, buf {:02x?} status {:08x?} len {:?}",
+            self.txn_id,
+            self.urb.urb.status,
+            self.buf,
+            pkt_status,
+            pkt_lens,
+        );
+
+        // Send notification
+        if had_unwanted_error
+            || (self.urb.urb.status != 0 && self.urb.urb.status != -libc::EOVERFLOW)
+        {
+            // An error, of a type we don't "tolerate"
+            let notif = crate::protocol::ResponseMessage::RequestError {
+                txn_id: self.txn_id,
+                error: crate::protocol::Errors::TransferError,
+                bytes_written: self.urb.urb.actual_length as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        } else {
+            // Success
+            let notif = crate::protocol::ResponseMessage::IsocRequestComplete {
+                txn_id: self.txn_id,
+                data,
+                pkt_status,
+                pkt_len: pkt_lens,
             };
             let notif = serde_json::to_string(&notif).unwrap();
             crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
