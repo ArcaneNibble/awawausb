@@ -910,7 +910,40 @@ impl USBDevice {
 
     fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface = self
+            .ep_to_idx
+            .get(&ep)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!("clear halt, sid = {}, txn = {}, {:02x}", sid, txn_id, ep,);
+
+        let ep = ep as u32;
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<u32>(b'U' as u32, 21),
+                &ep,
+            )
+        };
+        if ret != 0 {
+            log::warn!(
+                "CLEAR_HALT failed, sid = {}, txn = {}, err = {} ",
+                sid,
+                txn_id,
+                io::Error::last_os_error(),
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn isoc_xfer(
