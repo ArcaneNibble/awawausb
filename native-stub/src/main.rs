@@ -282,6 +282,16 @@ impl USBDevice {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxURBWrapper {
+    txn_id: String,
+    dir: USBTransferDirection,
+    buf: Vec<u8>,
+    urb: Box<usbdevfs_urb>,
+    _handles_rc: Rc<RefCell<LinuxHandles>>,
+}
+
+#[cfg(target_os = "linux")]
 impl USBDevice {
     pub fn setup(
         dev_usb_path: &Path,
@@ -502,8 +512,74 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
-        self._check_open()?;
-        todo!()
+        // TODO: apply iface/ep checks
+
+        log::debug!(
+            "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+            sid,
+            txn_id,
+            request_type,
+            request,
+            value,
+            index,
+            len,
+            buf
+        );
+
+        // FIXME: This generates an extraneous memory copy
+        // but we need to prepend the control transfer
+        let mut actual_buf = Vec::with_capacity(8 + len as usize);
+        actual_buf.push(request_type);
+        actual_buf.push(request);
+        actual_buf.extend_from_slice(&value.to_le_bytes());
+        actual_buf.extend_from_slice(&index.to_le_bytes());
+        actual_buf.extend_from_slice(&len.to_le_bytes());
+        actual_buf.extend_from_slice(&buf);
+
+        let urb = Box::new(usbdevfs_urb {
+            type_: USBDEVFS_URB_TYPE_CONTROL,
+            endpoint: 0,
+            status: 0,
+            flags: 0,
+            buffer: actual_buf.as_mut_ptr() as *mut (),
+            buffer_length: 8 + len as i32,
+            actual_length: 0,
+            start_frame: 0,
+            number_of_packets: 0,
+            error_count: 0,
+            signr: 0,
+            usercontext: ptr::null_mut(),
+        });
+        let urb_ptr = &*urb as *const usbdevfs_urb;
+
+        let mut urbwrapper = Box::new(LinuxURBWrapper {
+            txn_id: txn_id.to_owned(),
+            dir,
+            buf: actual_buf,
+            urb,
+            _handles_rc: self._linux_handles.clone(),
+        });
+        urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
+        let _urbwrapper = Box::into_raw(urbwrapper);
+
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
+                urb_ptr,
+            )
+        };
+        if ret == 0 {
+            Ok(DeviceOpResult::ManualCompletion)
+        } else {
+            log::warn!(
+                "SUBMITURB failed, sid = {}, txn = {}, err = {}",
+                sid,
+                txn_id,
+                io::Error::last_os_error()
+            );
+            Err(protocol::Errors::TransferError)
+        }
     }
 
     fn data_xfer(
@@ -1056,7 +1132,7 @@ impl USBDevice {
             request,
             value,
             index,
-            len as u16,
+            len,
             buf
         );
 
@@ -1067,7 +1143,7 @@ impl USBDevice {
             request,
             value,
             index,
-            len as u16,
+            len,
             timeout as u32,
             dir,
         ) {
@@ -1604,7 +1680,12 @@ impl USBStubEngine {
                         txn_ok = true;
                         dir = USBTransferDirection::DeviceToHost;
                         len = length.unwrap() as usize;
-                        buf = Vec::with_capacity(len);
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            // As a huge hack, on Linux we later allocate a new buffer
+                            // (so, don't waste memory allocating this buffer here)
+                            buf = Vec::with_capacity(len);
+                        }
                     }
                 } else {
                     if data.is_some() && length.is_none() {
@@ -1927,6 +2008,99 @@ impl USBStubEngine {
                     }
                 },
                 _ => {
+                    if evt.events & (libc::EPOLLOUT as u32) != 0 {
+                        // Some form of completion
+
+                        let sessionid = evt.u64;
+                        log::debug!("reap sid {}", sessionid);
+
+                        let devices = self.usb_devices.borrow();
+                        let dev = devices.get(&sessionid);
+                        if dev.is_none() {
+                            log::warn!("Reaping a sessionID we don't have?? 0x{:x}", sessionid);
+                            continue;
+                        }
+                        let fd = dev.unwrap()._linux_handles.borrow().dev_fd;
+
+                        loop {
+                            let mut urb: *mut usbdevfs_urb = ptr::null_mut();
+                            let ret = unsafe {
+                                libc::ioctl(fd, libc::_IOW::<*mut ()>(b'U' as u32, 13), &mut urb)
+                            };
+                            if ret != 0 {
+                                let err = io::Error::last_os_error();
+                                let errno = err.raw_os_error().unwrap();
+                                // These two errors are expected once we run out of URBs to reap
+                                if errno != libc::EAGAIN && errno != libc::ENODEV {
+                                    log::warn!("URB reap failed! {}", err);
+                                }
+                                break;
+                            }
+                            dbg!(urb);
+                            let recovered_wrapped_urb = unsafe {
+                                let wrapped_ptr = (*urb).usercontext as *mut LinuxURBWrapper;
+                                dbg!(wrapped_ptr);
+                                // SAFETY: Need to make sure this matches up with how we queue URBs
+                                let mut ret = Box::from_raw(wrapped_ptr);
+                                if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
+                                    // Linux reports the control transfer length, but doesn't remove the setup packet
+                                    ret.buf.set_len(8 + ret.urb.actual_length as usize);
+                                } else {
+                                    ret.buf.set_len(ret.urb.actual_length as usize);
+                                }
+                                ret
+                            };
+                            dbg!(&recovered_wrapped_urb);
+
+                            // Send notification
+                            if recovered_wrapped_urb.urb.status == -libc::EPIPE {
+                                let notif = crate::protocol::ResponseMessage::RequestError {
+                                    txn_id: recovered_wrapped_urb.txn_id,
+                                    error: crate::protocol::Errors::Stall,
+                                    bytes_written: recovered_wrapped_urb.urb.actual_length as u64,
+                                };
+                                let notif = serde_json::to_string(&notif).unwrap();
+                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
+                                    .expect("failed to write stdout");
+                            } else if recovered_wrapped_urb.urb.status == 0
+                                || recovered_wrapped_urb.urb.status == -libc::EOVERFLOW
+                            {
+                                let babble = recovered_wrapped_urb.urb.status == -libc::EOVERFLOW;
+                                let data = if recovered_wrapped_urb.dir
+                                    == crate::USBTransferDirection::DeviceToHost
+                                {
+                                    if recovered_wrapped_urb.urb.type_ == USBDEVFS_URB_TYPE_CONTROL
+                                    {
+                                        Some(
+                                            URL_SAFE_NO_PAD.encode(&recovered_wrapped_urb.buf[8..]),
+                                        )
+                                    } else {
+                                        Some(URL_SAFE_NO_PAD.encode(&recovered_wrapped_urb.buf))
+                                    }
+                                } else {
+                                    None
+                                };
+                                let notif = crate::protocol::ResponseMessage::RequestComplete {
+                                    txn_id: recovered_wrapped_urb.txn_id,
+                                    babble,
+                                    data,
+                                    bytes_written: recovered_wrapped_urb.urb.actual_length as u64,
+                                };
+                                let notif = serde_json::to_string(&notif).unwrap();
+                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
+                                    .expect("failed to write stdout");
+                            } else {
+                                let notif = crate::protocol::ResponseMessage::RequestError {
+                                    txn_id: recovered_wrapped_urb.txn_id,
+                                    error: crate::protocol::Errors::TransferError,
+                                    bytes_written: recovered_wrapped_urb.urb.actual_length as u64,
+                                };
+                                let notif = serde_json::to_string(&notif).unwrap();
+                                crate::stdio_unix::write_stdout_msg(notif.as_bytes())
+                                    .expect("failed to write stdout");
+                            }
+                        }
+                    }
                     if evt.events & (libc::EPOLLHUP as u32) != 0 {
                         // Device is unplugged
                         let sessionid = evt.u64;
