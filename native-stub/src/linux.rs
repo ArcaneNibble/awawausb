@@ -112,6 +112,16 @@ impl usbdevfs_urb_with_iso {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+pub fn unfuck_bytes(x: &[u8]) -> &[u8] {
+    x
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn unfuck_bytes(x: &[i8]) -> &[u8] {
+    unsafe { &*(x as *const [i8] as *const [u8]) }
+}
+
 #[derive(Debug)]
 pub struct LinuxHandles {
     pub sysfs_fd: i32,
@@ -146,7 +156,7 @@ impl LinuxHandles {
             let dirent = unsafe { *dirent };
 
             if dirent.d_type == libc::DT_DIR {
-                let dirname = CStr::from_bytes_until_nul(&dirent.d_name).unwrap();
+                let dirname = CStr::from_bytes_until_nul(unfuck_bytes(&dirent.d_name)).unwrap();
                 if dirname != c"." && dirname != c".." {
                     let mut iface_fn = dirname.to_bytes().to_vec();
                     iface_fn.extend_from_slice(b"/bInterfaceNumber\x00");

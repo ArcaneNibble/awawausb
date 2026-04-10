@@ -2674,7 +2674,8 @@ fn main() {
             let dirent_bus = unsafe { *dirent_bus };
 
             if dirent_bus.d_type == libc::DT_DIR {
-                let dirname_bus = CStr::from_bytes_until_nul(&dirent_bus.d_name).unwrap();
+                let dirname_bus =
+                    CStr::from_bytes_until_nul(unfuck_bytes(&dirent_bus.d_name)).unwrap();
                 if dirname_bus != c"." && dirname_bus != c".." {
                     let mut path_bus = b"/dev/bus/usb/".to_vec();
                     path_bus.extend_from_slice(dirname_bus.to_bytes());
@@ -2696,7 +2697,8 @@ fn main() {
 
                         if dirent_dev.d_type == libc::DT_CHR {
                             let dirname_dev =
-                                CStr::from_bytes_until_nul(&dirent_dev.d_name).unwrap();
+                                CStr::from_bytes_until_nul(unfuck_bytes(&dirent_dev.d_name))
+                                    .unwrap();
 
                             let mut full_path = PathBuf::new();
                             full_path.push("/dev/bus/usb");
