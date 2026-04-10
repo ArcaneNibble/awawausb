@@ -531,12 +531,107 @@ impl USBDevice {
 
     fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if iface_state.claimed {
+            log::debug!(
+                "Claiming already claimed interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+            Ok(DeviceOpResult::SendCompletionNow)
+        } else {
+            log::debug!(
+                "device claim interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+
+            let mut claim_struct = usbdevfs_disconnect_claim {
+                interface: value as u32,
+                flags: USBDEVFS_DISCONNECT_CLAIM_EXCEPT_DRIVER,
+                driver: [0; 256],
+            };
+            claim_struct.driver[..5].copy_from_slice(b"usbfs");
+            let ret = unsafe {
+                libc::ioctl(
+                    self._linux_handles.borrow().dev_fd,
+                    libc::_IOR::<usbdevfs_disconnect_claim>(b'U' as u32, 27),
+                    &claim_struct,
+                )
+            };
+            if ret != 0 {
+                let err = io::Error::last_os_error();
+                log::warn!(
+                    "claim interface failed {}, sid = {}, txn = {}, err = {} ",
+                    value,
+                    sid,
+                    txn_id,
+                    err
+                );
+
+                if err.raw_os_error().unwrap() == libc::ENOTTY {
+                    log::warn!(
+                        "Your kernel is _very_ old, missing required USBDEVFS_DISCONNECT_CLAIM!"
+                    );
+                    Err(protocol::Errors::TransferError)
+                } else if err.kind() == io::ErrorKind::ResourceBusy {
+                    Err(protocol::Errors::AlreadyClaimed)
+                } else {
+                    Err(protocol::Errors::TransferError)
+                }
+            } else {
+                // Claim interface successful
+                iface_state.claimed = true;
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+        }
     }
 
     fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
         self._check_open()?;
-        todo!()
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device release interface 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+
+        let intf = value as u32;
+        let ret = unsafe {
+            libc::ioctl(
+                self._linux_handles.borrow().dev_fd,
+                libc::_IOR::<u32>(b'U' as u32, 16),
+                &intf,
+            )
+        };
+        if ret != 0 {
+            log::warn!(
+                "release interface failed, sid = {}, txn = {}, err = {} ",
+                sid,
+                txn_id,
+                io::Error::last_os_error(),
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Release interface successful
+            iface_state.claimed = false;
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
@@ -557,7 +652,21 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
-        // TODO: apply iface/ep checks
+        // TODO: apply ep checks
+        // TODO: Impl timeout??
+
+        if request_type & 0b11111 == 1 {
+            // If it's an interface transfer, check if the interface is claimed
+            self._check_open()?;
+            let iface = index as u8;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
+        }
 
         log::debug!(
             "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
