@@ -112,14 +112,8 @@ impl usbdevfs_urb_with_iso {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
-pub fn unfuck_bytes(x: &[u8]) -> &[u8] {
-    x
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn unfuck_bytes(x: &[i8]) -> &[u8] {
-    unsafe { &*(x as *const [i8] as *const [u8]) }
+pub fn unfuck_bytes(x: &[libc::c_char]) -> &[u8] {
+    unsafe { &*(x as *const [libc::c_char] as *const [u8]) }
 }
 
 #[derive(Debug)]

@@ -2479,7 +2479,6 @@ impl USBStubEngine {
                                     ret
                                 };
 
-                                dbg!(&urb);
                                 urb.notify_completion();
                             }
                         }
