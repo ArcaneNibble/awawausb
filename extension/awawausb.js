@@ -263,7 +263,6 @@ class PerPageUSBDevice {
             opened: _2,
             page_devices: _3,
             interfaces_claimed: _4,
-            ep_to_idx: _5,
             ...ret
         } = this.global_usb_dev;
         return ret;
@@ -764,13 +763,7 @@ browser.runtime.onConnect.addListener((p) => {
 
             // Validate the desired configuration
             let conf = m.configurationValue & 0xff;
-            let found_conf;
-            for (let conf_desc of page_usb_dev.global_usb_dev.configs) {
-                if (conf_desc.bConfigurationValue === conf) {
-                    found_conf = conf_desc;
-                    break;
-                }
-            }
+            let found_conf = page_usb_dev.global_usb_dev.config_lookup.get(conf);
             if (found_conf === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -797,6 +790,7 @@ browser.runtime.onConnect.addListener((p) => {
                 if (!map_native_error(m.txn_id, res)) {
                     console.log("Device configuration changed", page_usb_dev.sid, conf);
                     page_usb_dev.global_usb_dev.current_config = conf;
+
                     let ifaces_claimed = new Array();
                     for (let iface of found_conf.interfaces) {
                         // XXX: What happens if/when the OS does something _weird_ with alt settings?
@@ -805,6 +799,7 @@ browser.runtime.onConnect.addListener((p) => {
                     }
                     page_usb_dev.global_usb_dev.interfaces_claimed = ifaces_claimed;
                     page_usb_dev.claimed_interfaces = new Array();
+
                     p.postMessage({
                         txn_id: m.txn_id,
                         success: true,
@@ -951,16 +946,15 @@ browser.runtime.onConnect.addListener((p) => {
             // Make sure this alt setting exists
             let found_iface_desc;
             let found_alt = false;
-            for (let conf_desc of page_usb_dev.global_usb_dev.configs) {
-                if (conf_desc.bConfigurationValue === page_usb_dev.global_usb_dev.current_config) {
-                    for (let iface_desc of conf_desc.interfaces) {
-                        if (iface_desc.bInterfaceNumber === iface) {
-                            for (let alt_desc of iface_desc.alts) {
-                                if (alt_desc.bAlternateSetting === alt) {
-                                    found_iface_desc = iface_desc;
-                                    found_alt = true;
-                                    break;
-                                }
+            let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+            if (conf_desc !== undefined) {
+                for (let iface_desc of conf_desc.interfaces) {
+                    if (iface_desc.bInterfaceNumber === iface) {
+                        for (let alt_desc of iface_desc.alts) {
+                            if (alt_desc.bAlternateSetting === alt) {
+                                found_iface_desc = iface_desc;
+                                found_alt = true;
+                                break;
                             }
                         }
                     }
@@ -1037,7 +1031,8 @@ browser.runtime.onConnect.addListener((p) => {
                 let ep = m.setup.index & 0xffff;
 
                 // Check interface
-                let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+                let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+                let iface_ep = conf_desc.ep_to_idx.get(ep);
                 if (iface_ep === undefined) {
                     p.postMessage({
                         txn_id: m.txn_id,
@@ -1102,7 +1097,8 @@ browser.runtime.onConnect.addListener((p) => {
             let ep = m.endpointNumber & 0xff;
 
             // Check interface
-            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+            let iface_ep = conf_desc.ep_to_idx.get(ep);
             if (iface_ep === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1168,7 +1164,8 @@ browser.runtime.onConnect.addListener((p) => {
             let ep = m.endpointNumber & 0xff;
 
             // Check interface
-            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+            let iface_ep = conf_desc.ep_to_idx.get(ep);
             if (iface_ep === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1214,7 +1211,8 @@ browser.runtime.onConnect.addListener((p) => {
             let packetLengths = Array.from(m.packetLengths, (x) => x & 0xffffffff);
 
             // Check interface
-            let iface_ep = page_usb_dev.global_usb_dev.ep_to_idx.get(ep);
+            let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+            let iface_ep = conf_desc.ep_to_idx.get(ep);
             if (iface_ep === undefined) {
                 p.postMessage({
                     txn_id: m.txn_id,
@@ -1353,10 +1351,13 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         // Big data shuffle, for descriptors
-        let ep_to_idx = new Map();
         let iface_claimed = new Array();
         let configs = new Array();
+        let config_lookup = new Map();
         for (let cfg of m.configs) {
+            // Each configuration has its own endpoints, which belong to interfaces
+            let ep_to_idx = new Map();
+
             // Configuration name string
             let config_name = null;
             if (cfg.iConfiguration !== 0) {
@@ -1412,11 +1413,15 @@ nativeport.onMessage.addListener(async (m) => {
                 });
             }
 
-            configs.push({
+            let config_obj = {
                 bConfigurationValue: cfg.bConfigurationValue,
                 config_name,
                 interfaces,
-            });
+
+                ep_to_idx,
+            };
+            configs.push(config_obj);
+            config_lookup.set(cfg.bConfigurationValue, config_obj);
         }
 
         // Try to query the WebUSB descriptors
@@ -1527,13 +1532,13 @@ nativeport.onMessage.addListener(async (m) => {
 
             current_config: m.current_config,
             configs,
+            config_lookup,
 
             // The following settings are for internal use only
             // and are hidden from content pages
             webusb_landing_page,
             opened: 0,
             interfaces_claimed: iface_claimed,
-            ep_to_idx,
             page_devices: new Set(),
         };
         usb_devices.set(sid, global_usb_dev);
