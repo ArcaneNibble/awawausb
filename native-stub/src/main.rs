@@ -84,10 +84,10 @@ pub struct USBDevice {
     pub serial_number: Option<String>,
 
     pub reformatted_config_descriptors: Vec<protocol::DeviceConfiguration>,
-    /// Map from bEndpointAddress to bInterfaceNumber
+    /// Map from (bConfigurationValue, bEndpointAddress) to bInterfaceNumber
     ///
     /// Different interfaces cannot use the same endpoints
-    pub ep_to_idx: HashMap<u8, u8>,
+    pub ep_to_idx: HashMap<(u8, u8), u8>,
 
     pub opened: bool,
     pub current_configuration_id: u8,
@@ -221,8 +221,10 @@ impl USBDevice {
                         if let Some(this_config_desc) = &mut this_config_desc {
                             if let Some(last_iface) = this_config_desc.interfaces.iter_mut().last()
                             {
-                                let old_iface = ep_to_idx
-                                    .insert(d.bEndpointAddress, last_iface.bInterfaceNumber);
+                                let old_iface = ep_to_idx.insert(
+                                    (this_config_desc.bConfigurationValue, d.bEndpointAddress),
+                                    last_iface.bInterfaceNumber,
+                                );
                                 if let Some(old_iface) = old_iface {
                                     if old_iface != last_iface.bInterfaceNumber {
                                         log::warn!(
@@ -748,7 +750,7 @@ impl USBDevice {
             let ep = index as u8;
             let iface = self
                 .ep_to_idx
-                .get(&ep)
+                .get(&(self.current_configuration_id, ep))
                 .ok_or(protocol::Errors::InvalidNumber)?;
             let iface_state = self
                 .current_if_state
@@ -840,7 +842,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
@@ -913,7 +915,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
@@ -960,7 +962,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
@@ -1517,7 +1519,7 @@ impl USBDevice {
             let ep = index as u8;
             let iface = self
                 .ep_to_idx
-                .get(&ep)
+                .get(&(self.current_configuration_id, ep))
                 .ok_or(protocol::Errors::InvalidNumber)?;
             let iface_state = self
                 .current_if_state
@@ -1581,7 +1583,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
@@ -1632,7 +1634,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
@@ -1677,7 +1679,7 @@ impl USBDevice {
 
         let iface = self
             .ep_to_idx
-            .get(&ep)
+            .get(&(self.current_configuration_id, ep))
             .ok_or(protocol::Errors::InvalidNumber)?;
         let iface_state = self
             .current_if_state
