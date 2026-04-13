@@ -2278,7 +2278,11 @@ impl USBStubEngine {
             );
 
             if nevents < 0 {
-                panic!("kevent poll failed: {:?}", std::io::Error::last_os_error());
+                let err = std::io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    return true;
+                }
+                panic!("kevent poll failed: {:?}", err);
             }
 
             // SAFETY: Set length to actual number of events
@@ -2355,7 +2359,11 @@ impl USBStubEngine {
             );
 
             if nevents < 0 {
-                panic!("epoll failed: {:?}", std::io::Error::last_os_error());
+                let err = std::io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    return true;
+                }
+                panic!("epoll failed: {:?}", err);
             }
 
             // SAFETY: Set length to actual number of events
