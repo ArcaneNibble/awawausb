@@ -2420,8 +2420,6 @@ impl USBStubEngine {
         // Poll for events
         let mut epoll_buf = self.epoll_buf.borrow_mut();
 
-        dbg!("loop running");
-
         // If we need to, grow the event buffer.
         // We have to do the grow here, and *NOT* immediately when adding new things to watch,
         // because new items get added while we are still iterating over the buffer.
