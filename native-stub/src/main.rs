@@ -43,8 +43,15 @@ mod macos_wrap;
 #[cfg(target_os = "macos")]
 use macos_wrap::*;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod stdio_unix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use stdio_unix::*;
+
+#[cfg(windows)]
+mod stdio_windows;
+#[cfg(windows)]
+use stdio_windows::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum USBTransferDirection {
@@ -1805,6 +1812,88 @@ impl USBDevice {
     }
 }
 
+#[cfg(windows)]
+impl USBDevice {
+    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+        todo!()
+    }
+
+    fn set_configuration(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        value: u8,
+        engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn ctrl_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        len: u16,
+        buf: Vec<u8>,
+        timeout: u64,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn data_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        len: u32,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        todo!()
+    }
+
+    fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
+        todo!()
+    }
+
+    fn isoc_xfer(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        dir: USBTransferDirection,
+        ep: u8,
+        total_len: usize,
+        pkt_len: Vec<u32>,
+        buf: Vec<u8>,
+    ) -> DeviceResult {
+        todo!()
+    }
+}
+
 #[cfg(target_os = "linux")]
 const RUNLOOP_EPOLL_STDIN: u64 = -1i64 as u64;
 #[cfg(target_os = "linux")]
@@ -2024,6 +2113,13 @@ impl USBStubEngine {
 
         // SAFETY: Make sure we set everything
         unsafe { Ok(this.init_ok()) }
+    }
+
+    #[cfg(windows)]
+    fn init_real(
+        mut this: pin_init::PinUninit<'_, Self>,
+    ) -> pin_init::InitResult<'_, Self, Infallible> {
+        todo!()
     }
 
     pub fn init() -> impl pin_init::Init<Self, Infallible> {
@@ -2780,6 +2876,12 @@ impl USBStubEngine {
         self.actual_needed_event_sz.update(|x| x + 1);
 
         Ok(())
+    }
+
+    #[cfg(windows)]
+    /// Run one loop. Returns true if we should continue
+    pub fn run_loop(self: Pin<&Self>) -> bool {
+        todo!()
     }
 }
 impl Drop for USBStubEngine {
