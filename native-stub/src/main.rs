@@ -11,6 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr;
+#[cfg(target_os = "macos")]
 use std::rc::Rc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -95,12 +96,8 @@ pub struct USBDevice {
     pub current_if_state: HashMap<u8, USBInterfaceState>,
 
     /// Linux-specific state
-    ///
-    /// Note: we *also* need Rc<RefCell<>> in order to handle older kernels
-    /// where HUP and ERR are delivered at the same time, making it so that
-    /// URBs which are not ready to reap yet will get lost.
     #[cfg(target_os = "linux")]
-    _linux_handles: Rc<RefCell<LinuxHandles>>,
+    _linux_handles: LinuxHandles,
 
     /// Map from endpoint address to (interface index, pipeRef)
     ///
@@ -437,7 +434,7 @@ impl USBDevice {
             current_configuration_id: current_config,
             current_if_state: HashMap::new(),
 
-            _linux_handles: Rc::new(RefCell::new(linux_dev)),
+            _linux_handles: linux_dev,
         };
 
         // This is only used to get the currently active alt settings
@@ -455,8 +452,7 @@ impl USBDevice {
 
     // Re-determine active interface alt settings
     fn linux_probe_ifaces(&mut self) -> io::Result<()> {
-        let linux_dev = self._linux_handles.borrow_mut();
-        self.current_if_state = linux_dev.reprobe_ifaces()?;
+        self.current_if_state = self._linux_handles.reprobe_ifaces()?;
         Ok(())
     }
 
@@ -491,12 +487,7 @@ impl USBDevice {
         self._check_open()?;
 
         log::debug!("device reset, sid = {}, txn = {}", sid, txn_id);
-        let ret = unsafe {
-            libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
-                libc::_IO(b'U' as u32, 20),
-            )
-        };
+        let ret = unsafe { libc::ioctl(self._linux_handles.dev_fd, libc::_IO(b'U' as u32, 20)) };
         if ret != 0 {
             log::warn!(
                 "device reset failed, sid = {}, txn = {}, err = {} ",
@@ -530,7 +521,7 @@ impl USBDevice {
         let config = value as u32;
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<u32>(b'U' as u32, 5),
                 &config,
             )
@@ -591,7 +582,7 @@ impl USBDevice {
             claim_struct.driver[..5].copy_from_slice(b"usbfs");
             let ret = unsafe {
                 libc::ioctl(
-                    self._linux_handles.borrow().dev_fd,
+                    self._linux_handles.dev_fd,
                     libc::_IOR::<usbdevfs_disconnect_claim>(b'U' as u32, 27),
                     &claim_struct,
                 )
@@ -645,7 +636,7 @@ impl USBDevice {
         let intf = value as u32;
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<u32>(b'U' as u32, 16),
                 &intf,
             )
@@ -690,7 +681,7 @@ impl USBDevice {
         };
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<usbdevfs_setinterface>(b'U' as u32, 4),
                 &set_alt_struct,
             )
@@ -804,14 +795,13 @@ impl USBDevice {
             dir,
             buf: actual_buf,
             urb,
-            _handles_rc: self._linux_handles.clone(),
         });
         urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
         let _urbwrapper = Box::into_raw(urbwrapper);
 
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
                 urb_ptr,
             )
@@ -885,14 +875,13 @@ impl USBDevice {
             dir,
             buf,
             urb,
-            _handles_rc: self._linux_handles.clone(),
         });
         urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
         let _urbwrapper = Box::into_raw(urbwrapper);
 
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
                 urb_ptr,
             )
@@ -930,7 +919,7 @@ impl USBDevice {
         let ep = ep as u32;
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<u32>(b'U' as u32, 21),
                 &ep,
             )
@@ -999,14 +988,13 @@ impl USBDevice {
             dir,
             buf,
             urb,
-            _handles_rc: self._linux_handles.clone(),
         });
         urbwrapper.urb.urb.usercontext = &*urbwrapper as *const LinuxIsoURBWrapper as *mut ();
         let _urbwrapper = Box::into_raw(urbwrapper);
 
         let ret = unsafe {
             libc::ioctl(
-                self._linux_handles.borrow().dev_fd,
+                self._linux_handles.dev_fd,
                 libc::_IOR::<usbdevfs_urb>(b'U' as u32, 10),
                 urb_ptr,
             )
@@ -2449,7 +2437,7 @@ impl USBStubEngine {
                                 // Make sure we don't ignore other events on this FD
                                 break 'usb_completion;
                             }
-                            let fd = dev.unwrap()._linux_handles.borrow().dev_fd;
+                            let fd = dev.unwrap()._linux_handles.dev_fd;
 
                             loop {
                                 let mut urb: *mut usbdevfs_urb = ptr::null_mut();

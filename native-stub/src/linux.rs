@@ -1,13 +1,11 @@
 use std::alloc::Layout;
 use std::cell::Cell;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::FromRawFd;
 use std::ptr;
-use std::rc::Rc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
@@ -228,7 +226,6 @@ pub struct LinuxURBWrapper {
     pub dir: crate::USBTransferDirection,
     pub buf: Vec<u8>,
     pub urb: Box<usbdevfs_urb>,
-    pub _handles_rc: Rc<RefCell<LinuxHandles>>,
 }
 impl LinuxURBWrapper {
     pub fn notify_completion(self) {
@@ -285,7 +282,6 @@ pub struct LinuxIsoURBWrapper {
     pub dir: crate::USBTransferDirection,
     pub buf: Vec<u8>,
     pub urb: Box<usbdevfs_urb_with_iso>,
-    pub _handles_rc: Rc<RefCell<LinuxHandles>>,
 }
 impl LinuxIsoURBWrapper {
     pub fn notify_completion(self) {
