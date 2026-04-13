@@ -226,6 +226,7 @@ pub struct LinuxURBWrapper {
     pub dir: crate::USBTransferDirection,
     pub buf: Vec<u8>,
     pub urb: Box<usbdevfs_urb>,
+    pub _timeout_fd: i32,
 }
 impl LinuxURBWrapper {
     pub fn notify_completion(self) {
@@ -239,7 +240,7 @@ impl LinuxURBWrapper {
         // Send notification
         if self.urb.status == -libc::EPIPE {
             let notif = crate::protocol::ResponseMessage::RequestError {
-                txn_id: self.txn_id,
+                txn_id: self.txn_id.clone(),
                 error: crate::protocol::Errors::Stall,
                 bytes_written: self.urb.actual_length as u64,
             };
@@ -257,7 +258,7 @@ impl LinuxURBWrapper {
                 None
             };
             let notif = crate::protocol::ResponseMessage::RequestComplete {
-                txn_id: self.txn_id,
+                txn_id: self.txn_id.clone(),
                 babble,
                 data,
                 bytes_written: self.urb.actual_length as u64,
@@ -266,12 +267,21 @@ impl LinuxURBWrapper {
             crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
         } else {
             let notif = crate::protocol::ResponseMessage::RequestError {
-                txn_id: self.txn_id,
+                txn_id: self.txn_id.clone(),
                 error: crate::protocol::Errors::TransferError,
                 bytes_written: self.urb.actual_length as u64,
             };
             let notif = serde_json::to_string(&notif).unwrap();
             crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+        }
+    }
+}
+impl Drop for LinuxURBWrapper {
+    fn drop(&mut self) {
+        if self._timeout_fd >= 0 {
+            unsafe {
+                libc::close(self._timeout_fd);
+            }
         }
     }
 }

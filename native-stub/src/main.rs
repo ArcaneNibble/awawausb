@@ -13,6 +13,8 @@ use std::pin::Pin;
 use std::ptr;
 #[cfg(target_os = "macos")]
 use std::rc::Rc;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(target_os = "linux")]
@@ -98,6 +100,11 @@ pub struct USBDevice {
     /// Linux-specific state
     #[cfg(target_os = "linux")]
     _linux_handles: LinuxHandles,
+    #[cfg(target_os = "linux")]
+    _linux_epoll_fd: i32,
+    /// The (one at a time) outstanding URB with a timeout
+    #[cfg(target_os = "linux")]
+    _linux_timeout_urb: Option<*const usbdevfs_urb>,
 
     /// Map from endpoint address to (interface index, pipeRef)
     ///
@@ -435,6 +442,8 @@ impl USBDevice {
             current_if_state: HashMap::new(),
 
             _linux_handles: linux_dev,
+            _linux_epoll_fd: engine.epoll_fd,
+            _linux_timeout_urb: None,
         };
 
         // This is only used to get the currently active alt settings
@@ -718,9 +727,6 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
-        // TODO: apply ep checks
-        // TODO: Impl timeout??
-
         if request_type & 0b11111 == 1 {
             // If it's an interface transfer, check if the interface is claimed
             self._check_open()?;
@@ -790,11 +796,97 @@ impl USBDevice {
         });
         let urb_ptr = &*urb as *const usbdevfs_urb;
 
+        let timeout_fd = if timeout != 0 {
+            // Timeouts exist but are *only* supported for internal-use-only control transfers
+            // (which means we use an ehhhhh-efficient mechanism to implement them)
+            let timeoutfd =
+                unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC) };
+            log::debug!(
+                "control transfer with timeout {} ms, fd = {}",
+                timeout,
+                timeoutfd
+            );
+            if timeoutfd >= 0 {
+                let timeout_dur = Duration::from_millis(timeout);
+
+                let timeout_struct = libc::itimerspec {
+                    it_interval: libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                    it_value: libc::timespec {
+                        tv_sec: timeout_dur.as_secs() as i64,
+                        tv_nsec: timeout_dur.subsec_nanos() as i64,
+                    },
+                };
+                let ret = unsafe {
+                    libc::timerfd_settime(timeoutfd, 0, &timeout_struct, ptr::null_mut())
+                };
+                if ret == 0 {
+                    // Register the timeout in epoll
+                    let mut epoll_timeout = libc::epoll_event {
+                        events: libc::EPOLLIN as u32,
+                        u64: sid | 0x80000000_00000000,
+                    };
+                    let ret = unsafe {
+                        libc::epoll_ctl(
+                            self._linux_epoll_fd,
+                            libc::EPOLL_CTL_ADD,
+                            timeoutfd,
+                            &mut epoll_timeout,
+                        )
+                    };
+                    if ret < 0 {
+                        log::warn!(
+                            "failed to set up timeout (epoll), sid = {}, txn = {}, err = {}",
+                            sid,
+                            txn_id,
+                            io::Error::last_os_error()
+                        );
+                    } else {
+                        // Timeout is *finally* all set up
+                        if self._linux_timeout_urb.is_some() {
+                            log::warn!(
+                                "BAD BAD BAD! Multiple URBs with timeout in flight, sid = {}, txn = {}",
+                                sid,
+                                txn_id,
+                            );
+                        }
+
+                        self._linux_timeout_urb = Some(urb_ptr);
+                    }
+
+                    timeoutfd
+                } else {
+                    log::warn!(
+                        "failed to set up timeout (settime), sid = {}, txn = {}, err = {}",
+                        sid,
+                        txn_id,
+                        io::Error::last_os_error()
+                    );
+
+                    timeoutfd
+                }
+            } else {
+                log::warn!(
+                    "failed to set up timeout (create), sid = {}, txn = {}, err = {}",
+                    sid,
+                    txn_id,
+                    io::Error::last_os_error()
+                );
+
+                -1
+            }
+        } else {
+            -1
+        };
+
         let mut urbwrapper = Box::new(LinuxURBWrapper {
             txn_id: txn_id.to_owned(),
             dir,
             buf: actual_buf,
             urb,
+            _timeout_fd: timeout_fd,
         });
         urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
         let _urbwrapper = Box::into_raw(urbwrapper);
@@ -875,6 +967,7 @@ impl USBDevice {
             dir,
             buf,
             urb,
+            _timeout_fd: -1,
         });
         urbwrapper.urb.usercontext = &*urbwrapper as *const LinuxURBWrapper as *mut ();
         let _urbwrapper = Box::into_raw(urbwrapper);
@@ -2422,7 +2515,38 @@ impl USBStubEngine {
                         }
                     }
                 },
-                _ => {
+                _ if evt.u64 >= 0x80000000_00000000 => {
+                    if evt.events & (libc::EPOLLIN as u32) != 0 {
+                        // This indicates a timeout
+
+                        let sessionid = evt.u64 & 0x7fffffff_ffffffff;
+                        log::debug!("timeout sid {}", sessionid);
+
+                        let mut devices = self.usb_devices.borrow_mut();
+                        let dev = devices.get_mut(&sessionid);
+                        if dev.is_none() {
+                            log::warn!("Timeout on a sessionID we don't have?? 0x{:x}", sessionid);
+                            // Make sure we don't ignore other events on this FD
+                            continue;
+                        }
+                        let dev = dev.unwrap();
+                        let fd = dev._linux_handles.dev_fd;
+
+                        if let Some(urb) = dev._linux_timeout_urb {
+                            let ret = unsafe { libc::ioctl(fd, libc::_IO(b'U' as u32, 11), urb) };
+                            if ret < 0 {
+                                log::warn!(
+                                    "Discarding URB failed, sid 0x{:x} urb {:?}",
+                                    sessionid,
+                                    urb
+                                );
+                            } else {
+                                dev._linux_timeout_urb = None;
+                            }
+                        }
+                    }
+                }
+                _ if evt.u64 < 0x80000000_00000000 => {
                     'usb_completion: {
                         if evt.events & (libc::EPOLLOUT as u32) != 0 {
                             // Some form of completion
@@ -2430,14 +2554,15 @@ impl USBStubEngine {
                             let sessionid = evt.u64;
                             log::debug!("reap sid {}", sessionid);
 
-                            let devices = self.usb_devices.borrow();
-                            let dev = devices.get(&sessionid);
+                            let mut devices = self.usb_devices.borrow_mut();
+                            let dev = devices.get_mut(&sessionid);
                             if dev.is_none() {
                                 log::warn!("Reaping a sessionID we don't have?? 0x{:x}", sessionid);
                                 // Make sure we don't ignore other events on this FD
                                 break 'usb_completion;
                             }
-                            let fd = dev.unwrap()._linux_handles.dev_fd;
+                            let dev = dev.unwrap();
+                            let fd = dev._linux_handles.dev_fd;
 
                             loop {
                                 let mut urb: *mut usbdevfs_urb = ptr::null_mut();
@@ -2456,6 +2581,10 @@ impl USBStubEngine {
                                         log::warn!("URB reap failed! {}", err);
                                     }
                                     break;
+                                }
+
+                                if dev._linux_timeout_urb == Some(urb) {
+                                    dev._linux_timeout_urb = None;
                                 }
 
                                 let is_iso = unsafe { (*urb).type_ == USBDEVFS_URB_TYPE_ISO };
@@ -2521,6 +2650,7 @@ impl USBStubEngine {
                         drop(dev);
                     }
                 }
+                _ => unreachable!(),
             }
         }
 
@@ -2553,6 +2683,11 @@ impl USBStubEngine {
     pub fn new_sid(&self) -> u64 {
         let sessionid = self.next_session_id.get();
         self.next_session_id.set(sessionid + 1);
+
+        if sessionid >= (0x80000000_00000000) {
+            panic!("Too many session IDs! (how???)");
+        }
+
         sessionid
     }
 
