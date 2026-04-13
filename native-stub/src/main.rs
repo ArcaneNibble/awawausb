@@ -2893,6 +2893,10 @@ impl Drop for USBStubEngine {
             IONotificationPortDestroy(self._io_notification_port);
             libc::close(self.kqueue);
         }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::close(self.epoll_fd);
+        }
     }
 }
 
