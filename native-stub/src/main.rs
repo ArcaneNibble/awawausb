@@ -2435,61 +2435,70 @@ impl USBStubEngine {
                     }
                 },
                 _ => {
-                    if evt.events & (libc::EPOLLOUT as u32) != 0 {
-                        // Some form of completion
+                    'usb_completion: {
+                        if evt.events & (libc::EPOLLOUT as u32) != 0 {
+                            // Some form of completion
 
-                        let sessionid = evt.u64;
-                        log::debug!("reap sid {}", sessionid);
+                            let sessionid = evt.u64;
+                            log::debug!("reap sid {}", sessionid);
 
-                        let devices = self.usb_devices.borrow();
-                        let dev = devices.get(&sessionid);
-                        if dev.is_none() {
-                            log::warn!("Reaping a sessionID we don't have?? 0x{:x}", sessionid);
-                            continue;
-                        }
-                        let fd = dev.unwrap()._linux_handles.borrow().dev_fd;
-
-                        loop {
-                            let mut urb: *mut usbdevfs_urb = ptr::null_mut();
-                            let ret = unsafe {
-                                libc::ioctl(fd, libc::_IOW::<*mut ()>(b'U' as u32, 13), &mut urb)
-                            };
-                            if ret != 0 {
-                                let err = io::Error::last_os_error();
-                                let errno = err.raw_os_error().unwrap();
-                                // These two errors are expected once we run out of URBs to reap
-                                if errno != libc::EAGAIN && errno != libc::ENODEV {
-                                    log::warn!("URB reap failed! {}", err);
-                                }
-                                break;
+                            let devices = self.usb_devices.borrow();
+                            let dev = devices.get(&sessionid);
+                            if dev.is_none() {
+                                log::warn!("Reaping a sessionID we don't have?? 0x{:x}", sessionid);
+                                // Make sure we don't ignore other events on this FD
+                                break 'usb_completion;
                             }
+                            let fd = dev.unwrap()._linux_handles.borrow().dev_fd;
 
-                            let is_iso = unsafe { (*urb).type_ == USBDEVFS_URB_TYPE_ISO };
-                            if !is_iso {
-                                let urb = unsafe {
-                                    let wrapped_ptr = (*urb).usercontext as *mut LinuxURBWrapper;
-                                    // SAFETY: Need to make sure this matches up with how we queue URBs
-                                    let mut ret = Box::from_raw(wrapped_ptr);
-                                    if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
-                                        // Linux reports the control transfer length, but doesn't include/remove the setup packet
-                                        ret.buf.set_len(8 + ret.urb.actual_length as usize);
-                                    } else {
-                                        ret.buf.set_len(ret.urb.actual_length as usize);
+                            loop {
+                                let mut urb: *mut usbdevfs_urb = ptr::null_mut();
+                                let ret = unsafe {
+                                    libc::ioctl(
+                                        fd,
+                                        libc::_IOW::<*mut ()>(b'U' as u32, 13),
+                                        &mut urb,
+                                    )
+                                };
+                                if ret != 0 {
+                                    let err = io::Error::last_os_error();
+                                    let errno = err.raw_os_error().unwrap();
+                                    // These two errors are expected once we run out of URBs to reap
+                                    if errno != libc::EAGAIN && errno != libc::ENODEV {
+                                        log::warn!("URB reap failed! {}", err);
                                     }
-                                    ret
-                                };
+                                    break;
+                                }
 
-                                urb.notify_completion();
-                            } else {
-                                let urb = unsafe {
-                                    let wrapped_ptr = (*urb).usercontext as *mut LinuxIsoURBWrapper;
-                                    // SAFETY: Need to make sure this matches up with how we queue URBs
-                                    let mut ret = Box::from_raw(wrapped_ptr);
-                                    ret.buf.set_len(ret.urb.urb.actual_length as usize);
-                                    ret
-                                };
+                                let is_iso = unsafe { (*urb).type_ == USBDEVFS_URB_TYPE_ISO };
+                                if !is_iso {
+                                    let urb = unsafe {
+                                        let wrapped_ptr =
+                                            (*urb).usercontext as *mut LinuxURBWrapper;
+                                        // SAFETY: Need to make sure this matches up with how we queue URBs
+                                        let mut ret = Box::from_raw(wrapped_ptr);
+                                        if ret.urb.type_ == USBDEVFS_URB_TYPE_CONTROL {
+                                            // Linux reports the control transfer length, but doesn't include/remove the setup packet
+                                            ret.buf.set_len(8 + ret.urb.actual_length as usize);
+                                        } else {
+                                            ret.buf.set_len(ret.urb.actual_length as usize);
+                                        }
+                                        ret
+                                    };
 
-                                urb.notify_completion();
+                                    urb.notify_completion();
+                                } else {
+                                    let urb = unsafe {
+                                        let wrapped_ptr =
+                                            (*urb).usercontext as *mut LinuxIsoURBWrapper;
+                                        // SAFETY: Need to make sure this matches up with how we queue URBs
+                                        let mut ret = Box::from_raw(wrapped_ptr);
+                                        ret.buf.set_len(ret.urb.urb.actual_length as usize);
+                                        ret
+                                    };
+
+                                    urb.notify_completion();
+                                }
                             }
                         }
                     }
@@ -2498,12 +2507,11 @@ impl USBStubEngine {
                         let sessionid = evt.u64;
                         log::debug!("unplug sid {}", sessionid);
 
-                        let mut devices = self.usb_devices.borrow_mut();
-                        let dev = devices.remove(&sessionid);
+                        let devices = self.usb_devices.borrow();
+                        let dev = devices.get(&sessionid);
                         if dev.is_none() {
                             log::warn!("Removing a sessionID we don't have?? 0x{:x}", sessionid);
                         }
-                        drop(dev);
 
                         // Send notification
                         let notif = protocol::ResponseMessage::UnplugDevice {
@@ -2511,6 +2519,18 @@ impl USBStubEngine {
                         };
                         let notif = serde_json::to_string(&notif).unwrap();
                         write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                    }
+                    if evt.events & (libc::EPOLLERR as u32) != 0 {
+                        // Device is fully gone, all URBs reaped
+                        let sessionid = evt.u64;
+                        log::debug!("destroy sid {}", sessionid);
+
+                        let mut devices = self.usb_devices.borrow_mut();
+                        let dev = devices.remove(&sessionid);
+                        if dev.is_none() {
+                            log::warn!("Destroying a sessionID we don't have?? 0x{:x}", sessionid);
+                        }
+                        drop(dev);
                     }
                 }
             }
