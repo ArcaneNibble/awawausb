@@ -1,12 +1,117 @@
 use std::io;
 use std::ptr;
+use std::sync::mpsc;
+use std::thread;
 
+use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Console::*;
+use windows_sys::Win32::System::Threading::*;
 
-/// Reads a message from stdin
-pub fn read_stdin_msg() -> io::Result<Vec<u8>> {
-    todo!()
+fn stdin_read_thread(event: usize, tx: mpsc::Sender<io::Result<Vec<u8>>>) {
+    let event = event as HANDLE;
+    let stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+
+    loop {
+        // Read 4-byte length
+        let mut msglen = [0u8; 4];
+        let mut nbytes = 0;
+        let ret = unsafe { ReadFile(stdin, msglen.as_mut_ptr(), 4, &mut nbytes, ptr::null_mut()) };
+        if ret == 0 {
+            let err = io::Error::last_os_error();
+            let e = if err.kind() == io::ErrorKind::BrokenPipe {
+                tx.send(Err(io::Error::from(io::ErrorKind::UnexpectedEof)))
+            } else {
+                tx.send(Err(err))
+            };
+            if e.is_err() {
+                break;
+            }
+        }
+        if nbytes < 4 {
+            let e = tx.send(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
+            if e.is_err() {
+                break;
+            }
+        }
+        let msglen = u32::from_ne_bytes(msglen);
+
+        // Read actual message
+        let mut buf: Vec<u8> = Vec::with_capacity(msglen as usize);
+        let mut nbytes = 0;
+        let ret = unsafe {
+            ReadFile(
+                stdin,
+                buf.as_mut_ptr(),
+                msglen,
+                &mut nbytes,
+                ptr::null_mut(),
+            )
+        };
+        if ret == 0 {
+            let e = tx.send(Err(io::Error::last_os_error()));
+            if e.is_err() {
+                break;
+            }
+        }
+        if nbytes < msglen {
+            let e = tx.send(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
+            if e.is_err() {
+                break;
+            }
+        }
+        unsafe {
+            buf.set_len(msglen as usize);
+        }
+
+        let e = tx.send(Ok(buf));
+        if e.is_err() {
+            break;
+        }
+        // SAFETY FIXME: We can race on this being torn down, but eh
+        unsafe { SetEvent(event) };
+    }
+
+    log::debug!("Bye from stdin reading thread!");
+}
+
+#[derive(Debug)]
+pub struct WinStdinReader {
+    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
+    pub event: HANDLE,
+}
+impl WinStdinReader {
+    pub fn new() -> Self {
+        let event = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+        if event.is_null() {
+            panic!(
+                "Failed to set up stdin event! {}",
+                io::Error::last_os_error()
+            );
+        }
+        let event2 = event.addr();
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || stdin_read_thread(event2, tx));
+
+        Self { rx, event }
+    }
+
+    /// Reads a message from stdin
+    pub fn read_stdin_msg(&self) -> io::Result<Vec<u8>> {
+        if let Ok(data) = self.rx.recv() {
+            data
+        } else {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+    }
+}
+impl Drop for WinStdinReader {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.event);
+        }
+    }
 }
 
 /// Writes a message to stdout
