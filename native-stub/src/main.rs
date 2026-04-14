@@ -1,12 +1,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::Infallible;
+#[cfg(windows)]
+use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::mem;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -2900,12 +2904,206 @@ impl Drop for USBStubEngine {
     }
 }
 
+#[cfg(windows)]
+fn multi_sz_to_list(inp: &[u16]) -> Vec<OsString> {
+    let mut ret = inp
+        .split(|x| *x == 0)
+        .map(|x| OsString::from_wide(x))
+        .collect::<Vec<_>>();
+
+    // Remove up to two training empty lists, because \x00\x00 end
+    if let Some(last) = ret.last()
+        && last.len() == 0
+    {
+        ret.pop();
+    }
+    if let Some(last) = ret.last()
+        && last.len() == 0
+    {
+        ret.pop();
+    }
+
+    ret
+}
+
 fn main() {
     stderrlog::new()
         .verbosity(log::Level::Debug)
         .init()
         .unwrap();
     log::info!("awawausb stub starting!");
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Devices::DeviceAndDriverInstallation::*;
+        use windows_sys::Win32::Devices::Properties::*;
+        use windows_sys::Win32::Devices::Usb::*;
+        use windows_sys::Win32::Foundation::*;
+
+        unsafe extern "system" fn notify_cb(
+            hnotify: HCMNOTIFICATION,
+            ctx: *const std::ffi::c_void,
+            action: i32,
+            event_data: *const CM_NOTIFY_EVENT_DATA,
+            event_data_sz: u32,
+        ) -> u32 {
+            dbg!(action);
+            unsafe {
+                dbg!((*event_data).FilterType);
+
+                let link_sz = event_data_sz as usize
+                    - mem::offset_of!(CM_NOTIFY_EVENT_DATA, u.DeviceInterface.SymbolicLink);
+                dbg!(link_sz);
+
+                let iface = &(*event_data).u.DeviceInterface;
+                let link_ptr = iface.SymbolicLink.as_ptr();
+                let link = std::slice::from_raw_parts(link_ptr, link_sz / 2);
+                let link_dbg = OsString::from_wide(&link);
+                dbg!(link_dbg);
+            }
+
+            ERROR_SUCCESS
+        }
+
+        let mut usb_devices = Vec::new();
+        loop {
+            let mut list_sz = 0;
+            let ret = unsafe {
+                CM_Get_Device_Interface_List_SizeW(
+                    &mut list_sz,
+                    &GUID_DEVINTERFACE_USB_DEVICE,
+                    ptr::null(),
+                    CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+                )
+            };
+
+            if ret != CR_SUCCESS {
+                log::warn!("listing devices failed! {}", io::Error::last_os_error());
+                break;
+            }
+
+            let mut buf = vec![0; list_sz as usize];
+            let ret = unsafe {
+                CM_Get_Device_Interface_ListW(
+                    &GUID_DEVINTERFACE_USB_DEVICE,
+                    ptr::null(),
+                    buf.as_mut_ptr(),
+                    list_sz,
+                    CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+                )
+            };
+
+            if ret == CR_BUFFER_SMALL {
+                continue;
+            }
+            if ret != CR_SUCCESS {
+                log::warn!("listing devices failed! {}", io::Error::last_os_error());
+                break;
+            }
+
+            usb_devices = multi_sz_to_list(&buf);
+            break;
+        }
+
+        dbg!("usb devices get!", &usb_devices);
+
+        for dev in &usb_devices {
+            let mut dev = dev.clone();
+            dev.push("\x00");
+            let dev = dev.encode_wide().collect::<Vec<_>>();
+
+            let mut buf_sz = 0;
+            let mut ptype = 0;
+            let ret = unsafe {
+                CM_Get_Device_Interface_PropertyW(
+                    dev.as_ptr(),
+                    &DEVPKEY_Device_InstanceId,
+                    &mut ptype,
+                    ptr::null_mut(),
+                    &mut buf_sz,
+                    0,
+                )
+            };
+            dbg!(ret);
+
+            let mut buf = vec![0u16; (buf_sz as usize + 1) / 2];
+            let ret = unsafe {
+                CM_Get_Device_Interface_PropertyW(
+                    dev.as_ptr(),
+                    &DEVPKEY_Device_InstanceId,
+                    &mut ptype,
+                    buf.as_mut_ptr() as *mut u8,
+                    &mut buf_sz,
+                    0,
+                )
+            };
+            dbg!(ret);
+
+            let buf_dbg = OsString::from_wide(&buf);
+            dbg!(buf_dbg);
+
+            let mut devnode = 0;
+            let ret =
+                unsafe { CM_Locate_DevNodeW(&mut devnode, buf.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) };
+            dbg!(ret, devnode);
+
+            //
+
+            let mut buf_sz = 0;
+            let mut ptype = 0;
+            let ret = unsafe {
+                CM_Get_DevNode_PropertyW(
+                    devnode,
+                    &DEVPKEY_Device_Service,
+                    &mut ptype,
+                    ptr::null_mut(),
+                    &mut buf_sz,
+                    0,
+                )
+            };
+            dbg!(ret);
+
+            let mut buf = vec![0u16; (buf_sz as usize + 1) / 2];
+            let ret = unsafe {
+                CM_Get_DevNode_PropertyW(
+                    devnode,
+                    &DEVPKEY_Device_Service,
+                    &mut ptype,
+                    buf.as_mut_ptr() as *mut u8,
+                    &mut buf_sz,
+                    0,
+                )
+            };
+            dbg!(ret);
+
+            let buf_dbg = OsString::from_wide(&buf);
+            dbg!(buf_dbg);
+        }
+
+        let notif_filter = CM_NOTIFY_FILTER {
+            cbSize: mem::size_of::<CM_NOTIFY_FILTER>() as u32,
+            Flags: 0,
+            FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+            Reserved: 0,
+            u: CM_NOTIFY_FILTER_0 {
+                DeviceInterface: CM_NOTIFY_FILTER_0_0 {
+                    ClassGuid: GUID_DEVINTERFACE_USB_DEVICE,
+                },
+            },
+        };
+        let mut h_notify_context = INVALID_HANDLE_VALUE;
+        let ret = unsafe {
+            CM_Register_Notification(
+                &notif_filter,
+                ptr::null(),
+                Some(notify_cb),
+                &mut h_notify_context,
+            )
+        };
+        dbg!(ret, h_notify_context);
+
+        loop {}
+    }
 
     pin_init::init_stack!(state = USBStubEngine::init());
     let state = state.unwrap();

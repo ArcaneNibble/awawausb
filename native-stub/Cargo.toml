@@ -16,3 +16,10 @@ usb-ch9 = { path = "../usb-ch9" }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 kqueue-sys = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Devices_Usb",
+] }
