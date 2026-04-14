@@ -5,12 +5,13 @@ use std::convert::Infallible;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::ffi::{CStr, CString, OsStr};
+use std::fmt::Debug;
 use std::io;
 use std::mem;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(windows)]
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -63,6 +64,46 @@ use enum_windows::*;
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::*;
+
+#[cfg(windows)]
+pub struct NullU16Path(pub Vec<u16>);
+#[cfg(windows)]
+impl From<&[u16]> for NullU16Path {
+    fn from(value: &[u16]) -> Self {
+        let mut ret = value.to_owned();
+        if ret.last() != Some(&0) {
+            ret.push(0);
+        }
+        Self(ret)
+    }
+}
+#[cfg(windows)]
+impl Debug for NullU16Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = OsString::from_wide(&self.0[..self.0.len() - 1]);
+        str.fmt(f)
+    }
+}
+
+#[cfg(windows)]
+pub struct DbgU16<'a>(pub &'a [u16]);
+#[cfg(windows)]
+impl<'a> From<&'a [u16]> for DbgU16<'a> {
+    fn from(value: &'a [u16]) -> Self {
+        Self(value)
+    }
+}
+#[cfg(windows)]
+impl<'a> Debug for DbgU16<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = if self.0.last() == Some(&0) {
+            OsString::from_wide(&self.0[..self.0.len() - 1])
+        } else {
+            OsString::from_wide(&self.0)
+        };
+        str.fmt(f)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum USBTransferDirection {
@@ -2953,28 +2994,6 @@ impl Drop for USBStubEngine {
             libc::close(self.epoll_fd);
         }
     }
-}
-
-#[cfg(windows)]
-fn multi_sz_to_list(inp: &[u16]) -> Vec<OsString> {
-    let mut ret = inp
-        .split(|x| *x == 0)
-        .map(|x| OsString::from_wide(x))
-        .collect::<Vec<_>>();
-
-    // Remove up to two training empty lists, because \x00\x00 end
-    if let Some(last) = ret.last()
-        && last.len() == 0
-    {
-        ret.pop();
-    }
-    if let Some(last) = ret.last()
-        && last.len() == 0
-    {
-        ret.pop();
-    }
-
-    ret
 }
 
 fn main() {
