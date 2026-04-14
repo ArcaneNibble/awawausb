@@ -56,6 +56,10 @@ use stdio_unix::*;
 mod stdio_windows;
 #[cfg(windows)]
 use stdio_windows::*;
+#[cfg(windows)]
+mod enum_windows;
+#[cfg(windows)]
+use enum_windows::*;
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::*;
@@ -1916,6 +1920,8 @@ pub struct USBStubEngine {
     // so we use channels to funnel a bunch of stuff back onto the main thread.
     #[cfg(windows)]
     stdin_reader: WinStdinReader,
+    #[cfg(windows)]
+    notifcation_handler: WinNotificationHandler,
 
     #[cfg(not(windows))]
     // As we watch more things, we make the event buffer bigger.
@@ -2140,6 +2146,7 @@ impl USBStubEngine {
             // (but others are okay, no drop impl)
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
             ptr::addr_of_mut!((*v).stdin_reader).write(WinStdinReader::new());
+            WinNotificationHandler::new(ptr::addr_of_mut!((*v).notifcation_handler));
         }
 
         // SAFETY: Make sure we set everything
@@ -2911,7 +2918,7 @@ impl USBStubEngine {
         log::debug!("win32 loop");
 
         // Poll for events
-        let waits = [self.stdin_reader.event];
+        let waits = [self.stdin_reader.event, self.notifcation_handler.h_event];
 
         let wait_result =
             unsafe { WaitForMultipleObjectsEx(waits.len() as u32, waits.as_ptr(), 0, INFINITE, 1) };
@@ -2922,6 +2929,9 @@ impl USBStubEngine {
                 if !cont {
                     return false;
                 }
+            }
+            1 => {
+                dbg!("got notification event!");
             }
             _ => {}
         }
