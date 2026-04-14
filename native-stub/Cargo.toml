@@ -22,4 +22,5 @@ windows-sys = { version = "0.61", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Devices_Usb",
+    "Win32_System_IO",
 ] }
