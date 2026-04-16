@@ -3156,8 +3156,39 @@ impl USBStubEngine {
                         WinHotplugNotification::NewInterface { .. } => {
                             USBDevice::setup(hotplug_notif, self);
                         }
-                        WinHotplugNotification::RemoveInterface { .. } => {
-                            dbg!(hotplug_notif);
+                        WinHotplugNotification::RemoveInterface {
+                            session_id,
+                            interface_no,
+                            interface_path: _,
+                        } => {
+                            let mut devices = self.usb_devices.borrow_mut();
+                            if let hash_map::Entry::Occupied(mut dev) = devices.entry(*session_id) {
+                                let removed = dev.get_mut()._win_ifaces.remove(interface_no);
+                                if removed.is_none() {
+                                    log::warn!(
+                                        "Removing an interface {:02x} of sessionID we don't have?? 0x{:x}",
+                                        interface_no,
+                                        session_id
+                                    );
+                                }
+
+                                if dev.get()._win_ifaces.len() == 0 {
+                                    // Send notification
+                                    let notif = protocol::ResponseMessage::UnplugDevice {
+                                        sid: session_id.to_string(),
+                                    };
+                                    let notif = serde_json::to_string(&notif).unwrap();
+                                    write_stdout_msg(notif.as_bytes())
+                                        .expect("failed to write stdout");
+
+                                    dev.remove();
+                                }
+                            } else {
+                                log::warn!(
+                                    "Removing a sessionID we don't have?? 0x{:x}",
+                                    session_id
+                                );
+                            }
                         }
                     }
                 }
