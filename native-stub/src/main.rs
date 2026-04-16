@@ -61,6 +61,10 @@ use stdio_windows::*;
 mod enum_windows;
 #[cfg(windows)]
 use enum_windows::*;
+#[cfg(windows)]
+mod usb_windows;
+#[cfg(windows)]
+use usb_windows::*;
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::*;
@@ -204,7 +208,9 @@ pub struct USBDevice {
 
     /// Map from bInterfaceNumber to *path*
     #[cfg(windows)]
-    _win_ifaces: HashMap<u8, OsString>,
+    _win_iface_paths: HashMap<u8, OsString>,
+    #[cfg(windows)]
+    _win_iface_handles: HashMap<u8, WinUSBHandle>,
     // Windows caches these *before* we ever set up
     #[cfg(windows)]
     _win_string_cache: HashMap<u8, Vec<u8>>,
@@ -1973,7 +1979,7 @@ impl USBDevice {
                 if let Some(existing_device) = engine.usb_devices.borrow_mut().get_mut(&session_id)
                 {
                     let orig = existing_device
-                        ._win_ifaces
+                        ._win_iface_paths
                         .insert(interface_no, interface_path);
                     if orig.is_some() {
                         log::warn!(
@@ -2061,13 +2067,14 @@ impl USBDevice {
                 current_configuration_id: dev_info.current_config,
                 current_if_state: HashMap::new(),
 
-                _win_ifaces: HashMap::new(),
+                _win_iface_paths: HashMap::new(),
+                _win_iface_handles: HashMap::new(),
                 _win_string_cache: dev_info.string_descs,
                 _win_bos_desc: dev_info.bos_desc,
             };
 
             // This is the only interface we know about so far
-            dev._win_ifaces.insert(interface_no, interface_path);
+            dev._win_iface_paths.insert(interface_no, interface_path);
 
             dev.reformat_config_descriptors(true);
 
@@ -2092,7 +2099,54 @@ impl USBDevice {
     }
 
     fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
-        todo!()
+        if self.opened {
+            log::debug!(
+                "Opening already opened device, sid = {}, txn = {}",
+                sid,
+                txn_id
+            );
+            Ok(DeviceOpResult::SendCompletionNow)
+        } else {
+            log::debug!("device open, sid = {}, txn = {}", sid, txn_id);
+
+            if self._win_iface_handles.len() > 0 {
+                // This should never happen, but we ignore it if it idoes
+                log::warn!("For some reason, we appear to already have a handle open?!");
+            }
+
+            // Try and open _any_ path we have, until it succeeds
+            let mut opened = None;
+            let mut ifaces_to_try = self._win_iface_paths.keys().collect::<Vec<_>>();
+            ifaces_to_try.sort();
+            for if_no in ifaces_to_try {
+                let if_path = self._win_iface_paths.get(if_no).unwrap();
+                log::debug!("Trying {:?}", if_path);
+                match WinUSBHandle::open(if_path) {
+                    Ok(handle) => {
+                        opened = Some((*if_no, handle));
+                        break;
+                    }
+                    Err(err) => {
+                        log::debug!("Failed to open {:?}: {}", if_path, err);
+                    }
+                }
+            }
+
+            if let Some((if_no, handle)) = opened {
+                // Open successful
+                log::debug!("Opened interface {:02x}", if_no);
+                self._win_iface_handles.insert(if_no, handle);
+                self.opened = true;
+                Ok(DeviceOpResult::SendCompletionNow)
+            } else {
+                log::warn!(
+                    "Couldn't open _any_ handles, sid = {}, txn = {}",
+                    sid,
+                    txn_id,
+                );
+                Err(protocol::Errors::TransferError)
+            }
+        }
     }
 
     fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
@@ -3313,7 +3367,7 @@ impl USBStubEngine {
                         } => {
                             let mut devices = self.usb_devices.borrow_mut();
                             if let hash_map::Entry::Occupied(mut dev) = devices.entry(*session_id) {
-                                let removed = dev.get_mut()._win_ifaces.remove(interface_no);
+                                let removed = dev.get_mut()._win_iface_paths.remove(interface_no);
                                 if removed.is_none() {
                                     log::warn!(
                                         "Removing an interface {:02x} of sessionID we don't have?? 0x{:x}",
@@ -3322,7 +3376,7 @@ impl USBStubEngine {
                                     );
                                 }
 
-                                if dev.get()._win_ifaces.len() == 0 {
+                                if dev.get()._win_iface_paths.len() == 0 {
                                     // Send notification
                                     let notif = protocol::ResponseMessage::UnplugDevice {
                                         sid: session_id.to_string(),
