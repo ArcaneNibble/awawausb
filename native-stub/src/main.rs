@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-#[cfg(target_os = "linux")]
+#[cfg(any(windows, target_os = "linux"))]
 use usb_ch9::USBDescriptor;
 
 pub mod protocol;
@@ -2138,6 +2138,96 @@ impl USBDevice {
         buf: Vec<u8>,
         timeout: u64,
     ) -> DeviceResult {
+        if request_type & 0b11111 == 1 {
+            // If it's an interface transfer, check if the interface is claimed
+            self._check_open()?;
+            let iface = index as u8;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
+        } else if request_type & 0b11111 == 2 {
+            // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
+            self._check_open()?;
+            if index > 0xff {
+                return Err(protocol::Errors::InvalidNumber);
+            }
+            let ep = index as u8;
+            let iface = self
+                .ep_to_idx
+                .get(&(self.current_configuration_id, ep))
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
+        }
+
+        log::debug!(
+            "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+            sid,
+            txn_id,
+            request_type,
+            request,
+            value,
+            index,
+            len,
+            buf
+        );
+
+        // As a _horrible hack_, answer get_descriptor requests from cache
+        if request_type == 0x80 && request == usb_ch9::ch9_core::requests::GET_DESCRIPTOR {
+            let mut answered = None;
+            match (value >> 8) as u8 {
+                usb_ch9::ch9_core::descriptor_types::DEVICE => {
+                    answered = Some(self.device_descriptor.to_bytes());
+                }
+                usb_ch9::ch9_core::descriptor_types::CONFIGURATION => {
+                    let which = (value & 0xff) as usize;
+                    if which < self.config_descriptors.len() {
+                        answered = Some(&self.config_descriptors[which]);
+                    }
+                }
+                usb_ch9::ch9_core::descriptor_types::STRING => {
+                    let which = (value & 0xff) as u8;
+                    if let Some(cached) = self._win_string_cache.get(&which) {
+                        answered = Some(&cached);
+                    }
+                }
+                15 => {
+                    // BOS
+                    if let Some(bos) = &self._win_bos_desc {
+                        answered = Some(&bos);
+                    }
+                }
+                _ => {}
+            }
+
+            if let Some(answered) = answered {
+                let actual_len = usize::min(answered.len(), len as usize);
+                let answered = &answered[..actual_len];
+
+                log::debug!("answering request from cache: {:?}", answered);
+
+                let data = Some(URL_SAFE_NO_PAD.encode(answered));
+                let notif = crate::protocol::ResponseMessage::RequestComplete {
+                    txn_id: txn_id.to_string(),
+                    babble: false,
+                    data,
+                    bytes_written: actual_len as u64,
+                };
+                let notif = serde_json::to_string(&notif).unwrap();
+                write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
+                return Ok(DeviceOpResult::ManualCompletion);
+            }
+        }
+
         todo!()
     }
 
