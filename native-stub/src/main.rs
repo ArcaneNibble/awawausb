@@ -2236,50 +2236,7 @@ impl USBDevice {
         timeout: u64,
         engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
-        if request_type & 0b11111 == 1 {
-            // If it's an interface transfer, check if the interface is claimed
-            self._check_open()?;
-            let iface = index as u8;
-            let iface_state = self
-                .current_if_state
-                .get_mut(&iface)
-                .ok_or(protocol::Errors::InvalidNumber)?;
-            if !iface_state.claimed {
-                return Err(protocol::Errors::InvalidState);
-            }
-        } else if request_type & 0b11111 == 2 {
-            // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
-            self._check_open()?;
-            if index > 0xff {
-                return Err(protocol::Errors::InvalidNumber);
-            }
-            let ep = index as u8;
-            let iface = self
-                .ep_to_idx
-                .get(&(self.current_configuration_id, ep))
-                .ok_or(protocol::Errors::InvalidNumber)?;
-            let iface_state = self
-                .current_if_state
-                .get_mut(&iface)
-                .ok_or(protocol::Errors::InvalidNumber)?;
-            if !iface_state.claimed {
-                return Err(protocol::Errors::InvalidState);
-            }
-        }
-
-        log::debug!(
-            "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
-            sid,
-            txn_id,
-            request_type,
-            request,
-            value,
-            index,
-            len,
-            buf
-        );
-
-        // As a _horrible hack_, answer get_descriptor requests from cache
+        // As a _horrible hack_, before *anything else*, answer get_descriptor requests from cache
         if request_type == 0x80 && request == usb_ch9::ch9_core::requests::GET_DESCRIPTOR {
             let mut answered = None;
             match (value >> 8) as u8 {
@@ -2326,53 +2283,109 @@ impl USBDevice {
             }
         }
 
-        // As another hack, internal requests with nonzero timeout are allowed to quickly open a handle
-        if timeout != 0 {
-            if self._win_iface_handles.len() > 0 {
-                // This should never happen, but we ignore it if it idoes
-                log::warn!("For some reason, we appear to already have a handle open?!");
+        // Otherwise it's _not_ something we have cached
+        let interface_handle;
+        let mut _internal_use_interface_handle;
+        if request_type & 0b11111 == 1 {
+            // If it's an interface transfer, check if the interface is claimed
+            self._check_open()?;
+            let iface = index as u8;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
             }
 
-            if let Some((if_no, mut handle)) = self._open_some_interface(engine) {
-                // Open successful
-                log::debug!(
-                    "Opened interface {:02x} (for internal control transfers)",
-                    if_no
-                );
+            todo!()
+        } else if request_type & 0b11111 == 2 {
+            // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
+            self._check_open()?;
+            if index > 0xff {
+                return Err(protocol::Errors::InvalidNumber);
+            }
+            let ep = index as u8;
+            let iface = self
+                .ep_to_idx
+                .get(&(self.current_configuration_id, ep))
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            let iface_state = self
+                .current_if_state
+                .get_mut(&iface)
+                .ok_or(protocol::Errors::InvalidNumber)?;
+            if !iface_state.claimed {
+                return Err(protocol::Errors::InvalidState);
+            }
 
-                if let Err(err) = handle.ctrl_xfer(
-                    txn_id,
-                    buf,
-                    request_type,
-                    request,
-                    value,
-                    index,
-                    len,
-                    timeout as u32,
-                    dir,
-                ) {
-                    // NOTE: A removed device doesn't seem to generate errors here
+            todo!()
+        } else {
+            // A device or a other/reserved request, so we need _something_ open
+            // (unless it's an internal-use-only request, as another huge hack)
+
+            // Checking the timeout is the hack we use to detect internal-use-only transfers
+            if timeout != 0 {
+                if self._win_iface_handles.len() > 0 {
+                    // This should never happen, but we ignore it if it idoes
+                    log::warn!("For some reason, we appear to already have a handle open?!");
+                }
+
+                if let Some((if_no, handle)) = self._open_some_interface(engine) {
+                    // Open successful
+                    log::debug!(
+                        "Opened interface {:02x} (for internal control transfers)",
+                        if_no
+                    );
+                    _internal_use_interface_handle = handle;
+                    interface_handle = &mut _internal_use_interface_handle;
+                } else {
                     log::warn!(
-                        "WinUsb_ControlTransfer failed, sid = {}, txn = {}, err = {} ",
+                        "Couldn't open _any_ handles, sid = {}, txn = {}",
                         sid,
                         txn_id,
-                        err
                     );
                     return Err(protocol::Errors::TransferError);
-                } else {
-                    return Ok(DeviceOpResult::ManualCompletion);
                 }
             } else {
-                log::warn!(
-                    "Couldn't open _any_ handles, sid = {}, txn = {}",
-                    sid,
-                    txn_id,
-                );
-                return Err(protocol::Errors::TransferError);
+                self._check_open()?;
+                // Just pick the first handle that pops out
+                interface_handle = self._win_iface_handles.values_mut().next().unwrap();
             }
         }
 
-        todo!()
+        log::debug!(
+            "control transfer, sid = {}, txn = {}, {:02x} {:02x} {:04x} {:04x} {:04x} {:02x?}",
+            sid,
+            txn_id,
+            request_type,
+            request,
+            value,
+            index,
+            len,
+            buf
+        );
+
+        if let Err(err) = interface_handle.ctrl_xfer(
+            txn_id,
+            buf,
+            request_type,
+            request,
+            value,
+            index,
+            len,
+            timeout as u32,
+            dir,
+        ) {
+            log::warn!(
+                "WinUsb_ControlTransfer failed, sid = {}, txn = {}, err = {} ",
+                sid,
+                txn_id,
+                err
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::ManualCompletion)
+        }
     }
 
     fn data_xfer(
