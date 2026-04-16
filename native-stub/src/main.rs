@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map};
 use std::convert::Infallible;
 #[cfg(windows)]
 use std::ffi::OsString;
@@ -198,6 +198,15 @@ pub struct USBDevice {
     /// Map from bInterfaceNumber to state
     pub current_if_state: HashMap<u8, USBInterfaceState>,
 
+    /// Map from bInterfaceNumber to *path*
+    #[cfg(windows)]
+    _win_ifaces: HashMap<u8, OsString>,
+    // Windows caches these *before* we ever set up
+    #[cfg(windows)]
+    _win_string_cache: HashMap<u8, Vec<u8>>,
+    #[cfg(windows)]
+    _win_bos_desc: Option<Vec<u8>>,
+
     /// Linux-specific state
     #[cfg(target_os = "linux")]
     _linux_handles: LinuxHandles,
@@ -249,7 +258,7 @@ impl USBDevice {
         write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
     }
 
-    pub(crate) fn reformat_config_descriptors(&mut self) {
+    pub(crate) fn reformat_config_descriptors(&mut self, create_iface_dummy_info: bool) {
         let mut ep_to_idx = HashMap::new();
         let mut configs = Vec::new();
         for cfg_desc in &self.config_descriptors {
@@ -258,9 +267,9 @@ impl USBDevice {
                 match desc {
                     usb_ch9::DescriptorRef::Config(d) => {
                         if this_config_desc.is_some() {
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(windows, target_os = "macos"))]
                             {
-                                // On macOS, we get individual descriptors per config
+                                // On Windows and macOS, we get individual descriptors per config
                                 log::warn!("Bogus extra configuration descriptor? {:?}", desc)
                             }
                             #[cfg(target_os = "linux")]
@@ -288,14 +297,23 @@ impl USBDevice {
                                 == self.current_configuration_id
                             {
                                 let current_if_state =
-                                    self.current_if_state.get(&d.bInterfaceNumber);
+                                    self.current_if_state.entry(d.bInterfaceNumber);
                                 match current_if_state {
-                                    Some(x) => x.alt_setting,
-                                    None => {
-                                        log::warn!(
-                                            "Descriptor has an interface 0x{:02x} we don't know about",
-                                            d.bInterfaceNumber
-                                        );
+                                    hash_map::Entry::Occupied(e) => e.get().alt_setting,
+                                    hash_map::Entry::Vacant(e) => {
+                                        if create_iface_dummy_info {
+                                            // On Windows, it's very annoying/difficult/impossible to get the real alt setting
+                                            // (so we just... don't)
+                                            e.insert(USBInterfaceState {
+                                                alt_setting: 0,
+                                                claimed: false,
+                                            });
+                                        } else {
+                                            log::warn!(
+                                                "Descriptor has an interface 0x{:02x} we don't know about",
+                                                d.bInterfaceNumber
+                                            );
+                                        }
                                         0
                                     }
                                 }
@@ -552,7 +570,7 @@ impl USBDevice {
             log::warn!("probing interfaces failed {}", e);
             // Tolerate this error
         }
-        dev.reformat_config_descriptors();
+        dev.reformat_config_descriptors(false);
 
         // At the *very* end, we can send this
         dev.send_plug_notification(sessionid, engine);
@@ -1302,7 +1320,7 @@ impl USBDevice {
 
         // Open a handle to all the interfaces
         dev.macos_probe_ifaces(engine)?;
-        dev.reformat_config_descriptors();
+        dev.reformat_config_descriptors(false);
 
         // At the *very* end, we can send this
         dev.send_plug_notification(sessionid, engine);
@@ -1908,6 +1926,122 @@ impl USBDevice {
 
 #[cfg(windows)]
 impl USBDevice {
+    pub fn setup(notif: WinHotplugNotification, engine: Pin<&USBStubEngine>) {
+        if let WinHotplugNotification::NewInterface {
+            session_id,
+            interface_no,
+            interface_path,
+            device_info,
+        } = notif
+        {
+            if device_info.is_none() {
+                if let Some(existing_device) = engine.usb_devices.borrow_mut().get_mut(&session_id)
+                {
+                    let orig = existing_device
+                        ._win_ifaces
+                        .insert(interface_no, interface_path);
+                    if orig.is_some() {
+                        log::warn!(
+                            "Adding an interface {:02x} to a device {} we *already* have!",
+                            interface_no,
+                            session_id
+                        );
+                    }
+                } else {
+                    log::warn!(
+                        "Ignoring adding an interface {:02x} {:?} to a device {} we don't have!",
+                        interface_no,
+                        interface_path,
+                        session_id
+                    );
+                }
+                return;
+            }
+            let dev_info = device_info.unwrap();
+
+            let vendor_name = if dev_info.dev_desc.iManufacturer != 0 {
+                if let Some(s) = dev_info.string_descs.get(&dev_info.dev_desc.iManufacturer) {
+                    if let Some((s, _)) = usb_ch9::ch9_core::StringDescriptor::from_bytes(&s) {
+                        Some(
+                            s.payload()
+                                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                                .collect::<String>(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let product_name = if dev_info.dev_desc.iProduct != 0 {
+                if let Some(s) = dev_info.string_descs.get(&dev_info.dev_desc.iProduct) {
+                    if let Some((s, _)) = usb_ch9::ch9_core::StringDescriptor::from_bytes(&s) {
+                        Some(
+                            s.payload()
+                                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                                .collect::<String>(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let serial_number = if dev_info.dev_desc.iSerialNumber != 0 {
+                if let Some(s) = dev_info.string_descs.get(&dev_info.dev_desc.iSerialNumber) {
+                    if let Some((s, _)) = usb_ch9::ch9_core::StringDescriptor::from_bytes(&s) {
+                        Some(
+                            s.payload()
+                                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                                .collect::<String>(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut dev = USBDevice {
+                device_descriptor: dev_info.dev_desc,
+                config_descriptors: dev_info.config_descs,
+                vendor_name,
+                product_name,
+                serial_number,
+
+                reformatted_config_descriptors: Vec::new(),
+                ep_to_idx: HashMap::new(),
+
+                opened: false,
+                current_configuration_id: dev_info.current_config,
+                current_if_state: HashMap::new(),
+
+                _win_ifaces: HashMap::new(),
+                _win_string_cache: dev_info.string_descs,
+                _win_bos_desc: dev_info.bos_desc,
+            };
+
+            // This is the only interface we know about so far
+            dev._win_ifaces.insert(interface_no, interface_path);
+
+            dev.reformat_config_descriptors(true);
+
+            // At the *very* end, we can send this
+            dev.send_plug_notification(session_id, engine);
+        } else {
+            panic!("passed wrong notification to setup!")
+        }
+    }
+
     fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
         todo!()
     }
@@ -3018,7 +3152,14 @@ impl USBStubEngine {
             }
             1 => {
                 while let Some(hotplug_notif) = self.notifcation_handler.get_notif() {
-                    dbg!(hotplug_notif);
+                    match &hotplug_notif {
+                        WinHotplugNotification::NewInterface { .. } => {
+                            USBDevice::setup(hotplug_notif, self);
+                        }
+                        WinHotplugNotification::RemoveInterface { .. } => {
+                            dbg!(hotplug_notif);
+                        }
+                    }
                 }
             }
             _ => {}
