@@ -25,6 +25,8 @@ use windows_sys::core::*;
 
 use crate::{NullU16, OsStringFromWideWithNull};
 
+const BOS_DESCRIPTOR_TYPE: u8 = 15;
+
 #[repr(C, packed(1))]
 #[allow(non_snake_case)]
 struct USB_DESCRIPTOR_REQUEST_WORKS {
@@ -497,7 +499,8 @@ impl HubHandle {
         desc_idx: u8,
         w_index: u16,
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        let is_reading_cfg_desc = desc_ty == usb_ch9::ch9_core::descriptor_types::CONFIGURATION;
+        let is_reading_long_desc = (desc_ty == usb_ch9::ch9_core::descriptor_types::CONFIGURATION)
+            || (desc_ty == BOS_DESCRIPTOR_TYPE);
 
         // Do an initial read to see how big the descriptor is
         let mut rbytes = 0;
@@ -507,7 +510,7 @@ impl HubHandle {
             bRequest: 0,
             wValue: ((desc_ty as u16) << 8) | (desc_idx as u16),
             wIndex: w_index,
-            wLength: if is_reading_cfg_desc { 4 } else { 2 },
+            wLength: if is_reading_long_desc { 4 } else { 2 },
             data: [0; 4],
         };
 
@@ -538,7 +541,7 @@ impl HubHandle {
         }
 
         // Get the actual length to read
-        let actual_len = if is_reading_cfg_desc {
+        let actual_len = if is_reading_long_desc {
             // wTotalLength
             (initial_desc.data[2] as usize) | ((initial_desc.data[3] as usize) << 8)
         } else {
@@ -971,7 +974,7 @@ fn probe_new_device(
         }
 
         let bos_desc = if dev_desc.bcdUSB >= 0x0201 {
-            let bos_desc = hub_handle.get_descriptor(15, 0, 0)?;
+            let bos_desc = hub_handle.get_descriptor(BOS_DESCRIPTOR_TYPE, 0, 0)?;
             if let Some(bos_desc) = bos_desc {
                 Some(bos_desc)
             } else {
