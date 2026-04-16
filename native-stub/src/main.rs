@@ -623,7 +623,12 @@ impl USBDevice {
         Ok(())
     }
 
-    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+    fn open_device(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        _engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
         log::debug!("device open (dummy), sid = {}, txn = {}", sid, txn_id);
         // In Linux, we effectively don't have to do anything to open/close the device
         // By the time we "detect" the device, we already have it open
@@ -884,6 +889,7 @@ impl USBDevice {
         len: u16,
         buf: Vec<u8>,
         timeout: u64,
+        _engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
         if request_type & 0b11111 == 1 {
             // If it's an interface transfer, check if the interface is claimed
@@ -1436,7 +1442,12 @@ impl USBDevice {
         Ok(())
     }
 
-    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+    fn open_device(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        _engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
         if self.opened {
             log::debug!(
                 "Opening already opened device, sid = {}, txn = {}",
@@ -1734,6 +1745,7 @@ impl USBDevice {
         len: u16,
         buf: Vec<u8>,
         timeout: u64,
+        _engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
         // As a special exception, "device" control transfers do *not* require the device to be open
         // This is a hack for the "interal" page access. The JS API does it's *own* check for this,
@@ -2099,7 +2111,7 @@ impl USBDevice {
     }
 
     // Try and open _any_ path we have, until it succeeds
-    fn _open_some_interface(&mut self) -> Option<(u8, WinUSBHandle)> {
+    fn _open_some_interface(&mut self, engine: Pin<&USBStubEngine>) -> Option<(u8, WinUSBHandle)> {
         let mut opened = None;
         let mut ifaces_to_try = self._win_iface_paths.keys().collect::<Vec<_>>();
         ifaces_to_try.sort();
@@ -2117,10 +2129,26 @@ impl USBDevice {
             }
         }
 
+        if let Some((_, handles)) = &opened {
+            let ret = unsafe {
+                windows_sys::Win32::System::IO::CreateIoCompletionPort(
+                    handles.raw_handle,
+                    engine.iocp,
+                    0,
+                    0,
+                )
+            };
+            if ret.is_null() {
+                let err = io::Error::last_os_error();
+                log::warn!("Failed to associate IOCP! {}", err);
+                return None;
+            }
+        }
+
         opened
     }
 
-    fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
+    fn open_device(&mut self, sid: u64, txn_id: &str, engine: Pin<&USBStubEngine>) -> DeviceResult {
         if self.opened {
             log::debug!(
                 "Opening already opened device, sid = {}, txn = {}",
@@ -2136,7 +2164,7 @@ impl USBDevice {
                 log::warn!("For some reason, we appear to already have a handle open?!");
             }
 
-            if let Some((if_no, handle)) = self._open_some_interface() {
+            if let Some((if_no, handle)) = self._open_some_interface(engine) {
                 // Open successful
                 log::debug!("Opened interface {:02x}", if_no);
                 self._win_iface_handles.insert(if_no, handle);
@@ -2206,6 +2234,7 @@ impl USBDevice {
         len: u16,
         buf: Vec<u8>,
         timeout: u64,
+        engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
         if request_type & 0b11111 == 1 {
             // If it's an interface transfer, check if the interface is claimed
@@ -2297,6 +2326,52 @@ impl USBDevice {
             }
         }
 
+        // As another hack, internal requests with nonzero timeout are allowed to quickly open a handle
+        if timeout != 0 {
+            if self._win_iface_handles.len() > 0 {
+                // This should never happen, but we ignore it if it idoes
+                log::warn!("For some reason, we appear to already have a handle open?!");
+            }
+
+            if let Some((if_no, mut handle)) = self._open_some_interface(engine) {
+                // Open successful
+                log::debug!(
+                    "Opened interface {:02x} (for internal control transfers)",
+                    if_no
+                );
+
+                if let Err(err) = handle.ctrl_xfer(
+                    txn_id,
+                    buf,
+                    request_type,
+                    request,
+                    value,
+                    index,
+                    len,
+                    timeout as u32,
+                    dir,
+                ) {
+                    // NOTE: A removed device doesn't seem to generate errors here
+                    log::warn!(
+                        "WinUsb_ControlTransfer failed, sid = {}, txn = {}, err = {} ",
+                        sid,
+                        txn_id,
+                        err
+                    );
+                    return Err(protocol::Errors::TransferError);
+                } else {
+                    return Ok(DeviceOpResult::ManualCompletion);
+                }
+            } else {
+                log::warn!(
+                    "Couldn't open _any_ handles, sid = {}, txn = {}",
+                    sid,
+                    txn_id,
+                );
+                return Err(protocol::Errors::TransferError);
+            }
+        }
+
         todo!()
     }
 
@@ -2347,6 +2422,10 @@ pub struct USBStubEngine {
     stdin_reader: WinStdinReader,
     #[cfg(windows)]
     notifcation_handler: WinNotificationHandler,
+    // We also process IOCPs on a background thread, because Windows is insistent.
+    // Our USB transfer structs are self-contained, so this Should Be Fine (TM)
+    #[cfg(windows)]
+    iocp: windows_sys::Win32::Foundation::HANDLE,
 
     #[cfg(not(windows))]
     // As we watch more things, we make the event buffer bigger.
@@ -2565,6 +2644,18 @@ impl USBStubEngine {
     ) -> pin_init::InitResult<'_, Self, Infallible> {
         let v = this.get_mut().as_mut_ptr();
 
+        let iocp = unsafe {
+            windows_sys::Win32::System::IO::CreateIoCompletionPort(
+                windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                ptr::null_mut(),
+                0,
+                1,
+            )
+        };
+        if iocp.is_null() {
+            panic!("Couldn't create IOCP: {}", io::Error::last_os_error());
+        }
+
         // SAFETY: Make sure we set everything
         unsafe {
             // SAFETY: Don't drop uninit objects
@@ -2572,6 +2663,7 @@ impl USBStubEngine {
             ptr::addr_of_mut!((*v).usb_devices).write(RefCell::new(HashMap::new()));
             ptr::addr_of_mut!((*v).stdin_reader).write(WinStdinReader::new());
             WinNotificationHandler::new(ptr::addr_of_mut!((*v).notifcation_handler));
+            (*v).iocp = iocp;
         }
 
         // SAFETY: Make sure we set everything
@@ -2638,7 +2730,7 @@ impl USBStubEngine {
                     .get_mut(&sid)
                     .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                usb_dev.open_device(sid, &txn_id)
+                usb_dev.open_device(sid, &txn_id, self)
             }
             protocol::RequestMessage::CloseDevice { sid, txn_id } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
@@ -2770,6 +2862,7 @@ impl USBStubEngine {
                     len as u16,
                     buf,
                     timeout,
+                    self,
                 )
             }
             protocol::RequestMessage::DataTransfer {
@@ -3420,6 +3513,17 @@ impl Drop for USBStubEngine {
         unsafe {
             libc::close(self.epoll_fd);
         }
+        #[cfg(windows)]
+        unsafe {
+            // Post a quit notification to the IOCP thread
+            windows_sys::Win32::System::IO::PostQueuedCompletionStatus(
+                self.iocp,
+                0,
+                1,
+                ptr::null(),
+            );
+            windows_sys::Win32::Foundation::CloseHandle(self.iocp);
+        }
     }
 }
 
@@ -3454,6 +3558,9 @@ fn main() {
             }
             Err(err) => log::warn!("Initial probing device failed! {}", err),
         }
+
+        let iocp = state.iocp.addr();
+        std::thread::spawn(move || iocp_thread(iocp));
     }
 
     #[cfg(target_os = "linux")]
