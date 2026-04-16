@@ -66,6 +66,20 @@ use enum_windows::*;
 use windows_sys::Win32::System::Threading::*;
 
 #[cfg(windows)]
+pub trait OsStringFromWideWithNull {
+    fn from_wide_null(inp: &[u16]) -> OsString;
+}
+#[cfg(windows)]
+impl OsStringFromWideWithNull for OsString {
+    fn from_wide_null(mut inp: &[u16]) -> OsString {
+        if inp.last() == Some(&0) {
+            inp = &inp[..inp.len() - 1]
+        }
+        OsString::from_wide(inp)
+    }
+}
+#[cfg(windows)]
+/// An owning container of a definitely-null-terminated UCS-2 string
 pub struct NullU16(Vec<u16>);
 #[cfg(windows)]
 impl From<&[u16]> for NullU16 {
@@ -113,6 +127,7 @@ impl Debug for NullU16 {
 }
 
 #[cfg(windows)]
+/// A non-owning debugging helper for a usually-null-terminated UCS-2 string
 pub struct DbgU16<'a>(pub &'a [u16]);
 #[cfg(windows)]
 impl<'a> From<&'a [u16]> for DbgU16<'a> {

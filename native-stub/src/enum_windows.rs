@@ -1,4 +1,5 @@
 use std::alloc::Layout;
+use std::collections::{HashMap, hash_map};
 use std::error;
 use std::ffi::{OsString, c_void};
 use std::fmt::{Debug, Display};
@@ -6,7 +7,7 @@ use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::ptr;
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::*;
 use windows_sys::Win32::Devices::Properties::*;
@@ -20,7 +21,7 @@ use windows_sys::Win32::System::Registry::{REG_MULTI_SZ, REG_SZ};
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::core::*;
 
-use crate::NullU16;
+use crate::{NullU16, OsStringFromWideWithNull};
 
 #[repr(C, packed(1))]
 #[allow(non_snake_case)]
@@ -77,6 +78,7 @@ pub enum WinEnumerationError {
     IoError(io::Error),
     UnexpectedPropertyType(&'static str),
     CouldNotFindHub,
+    CouldNotFindInterfaceNo,
 }
 impl error::Error for WinEnumerationError {
     fn cause(&self) -> Option<&dyn error::Error> {
@@ -96,6 +98,7 @@ impl Display for WinEnumerationError {
                 write!(f, "tried to read {} but it had the wrong type", msg)
             }
             Self::CouldNotFindHub => write!(f, "Could not find the hub owning the device"),
+            Self::CouldNotFindInterfaceNo => write!(f, "Could not figure out the interface number"),
         }
     }
 }
@@ -431,7 +434,7 @@ fn get_devnode_custom_multi_str_property(
     Ok(multi_sz_to_list(&buf))
 }
 
-fn get_dev_inst_id(instance_path: &[u16]) -> Result<Vec<u16>, WinEnumerationError> {
+fn get_dev_inst_id(instance_path: &[u16]) -> Result<NullU16, WinEnumerationError> {
     let mut buf_sz = 0;
     let mut ptype = 0;
     let ret = unsafe {
@@ -477,7 +480,7 @@ fn get_dev_inst_id(instance_path: &[u16]) -> Result<Vec<u16>, WinEnumerationErro
         buf.set_len(buf_sz as usize / 2);
     }
 
-    Ok(buf)
+    Ok(NullU16::from(buf))
 }
 
 fn get_descritor(
@@ -579,45 +582,63 @@ fn get_descritor(
     Ok(Some(buf.data.to_owned()))
 }
 
-fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerationError> {
+fn probe_new_device(
+    db: &Mutex<WinHotplugDatabase>,
+    guid: GUID,
+    instance_path: &[u16],
+) -> Result<Option<()>, WinEnumerationError> {
     // At the beginning here, we have an instance path (starts with \\?\) to _something_,
     // but we don't know anything else about it
+    log::debug!(
+        "Enumeration asked to look into {:?}",
+        crate::DbgU16(instance_path)
+    );
 
-    // The first thing we want to do is map this to a device _instance_ ID (starts with USB\)
-    let dev_inst_id = get_dev_inst_id(instance_path)?;
-    dbg!(crate::DbgU16(&dev_inst_id));
+    // The first thing we want to do is map this to a device _instance_ ID (starts with USB\...)
+    let this_dev_inst_id = get_dev_inst_id(instance_path)?;
+    log::debug!(
+        "The instance ID for {:?} is {:?}",
+        crate::DbgU16(instance_path),
+        this_dev_inst_id
+    );
 
-    // Now we need to turn this into a devnode, which we can _actually_ use to do stuff with
+    // Now we need to turn this into a devnode (a u32), which we can _actually_ use to query CfgMgr32
     let mut devnode = 0;
-    let ret =
-        unsafe { CM_Locate_DevNodeW(&mut devnode, dev_inst_id.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) };
+    let ret = unsafe {
+        CM_Locate_DevNodeW(
+            &mut devnode,
+            this_dev_inst_id.as_ref().as_ptr(),
+            CM_LOCATE_DEVNODE_NORMAL,
+        )
+    };
     if ret != CR_SUCCESS {
         return Err(CfgMgrError::from(ret).into());
     }
-    dbg!(devnode);
 
     // Now we check if this is actually a WinUSB device
     let driver =
         get_devnode_str_property(devnode, &DEVPKEY_Device_Service, "DEVPKEY_Device_Service")?;
-    dbg!(&driver);
 
     let driver = OsString::from_wide(driver.as_ref());
     if !driver.eq_ignore_ascii_case("WinUSB\0") {
-        return Ok(());
+        return Ok(None);
     }
     log::debug!(
         "Probing {:?} which is a WinUSB instance",
         crate::DbgU16(instance_path)
     );
 
-    // We *definitely* have a WinUSB instance now, but we have no idea if we're looking at a "desired"
+    // We *definitely* have a WinUSB device now, but we have no idea if we're looking at a "desired"
     // "device interface class" or not.
     //
-    // Possible "useless" classes include GUID_DEVINTERFACE_USB_HUB (which can't be used with WinUSB at all
+    // Possible "useless" classes include GUID_DEVINTERFACE_USB_HUB (which can't be used with WinUSB at all)
     // or the (undocumented-ish) GUID_DEVINTERFACE_WINUSB_WINRT (which has weird extra restrictions)
     //
     // In order to check if this is one of the "actual" WinUSB GUIDs (and not e.g. the WinRT one),
     // we have to use this semi-undocumented query of the registry to see what the allowed GUIDs are.
+    // Then we check if we are one of them. If not, we bail out. This can potentially result in
+    // multiple probes of the same WinUSB interface with multiple different GUIDs.
+    // We deal with that later.
 
     let mut possible_guids = Vec::new();
 
@@ -647,7 +668,8 @@ fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerat
     }
 
     if !possible_guids.contains(&UnfuckedGUID(guid)) {
-        return Ok(());
+        log::debug!("This interface isn't a useful WinUSB GUID");
+        return Ok(None);
     }
 
     log::debug!("Probing further into {:?}", crate::DbgU16(instance_path));
@@ -660,24 +682,59 @@ fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerat
     if ret != CR_SUCCESS {
         return Err(CfgMgrError::from(ret).into());
     }
-    dbg!(parent);
 
     let parent_driver =
-        get_devnode_str_property(parent, &DEVPKEY_Device_Service, "DEVPKEY_Device_Service")
-            .unwrap();
-    dbg!(&parent_driver);
-
+        get_devnode_str_property(parent, &DEVPKEY_Device_Service, "DEVPKEY_Device_Service")?;
     let parent_driver = OsString::from_wide(parent_driver.as_ref());
 
-    let is_composite;
+    let interface_no;
     let device_devnode;
     let hub_devnode;
     if parent_driver.eq_ignore_ascii_case("usbccgp\0")
         // some workaround for some Samsung devices??
         || parent_driver.eq_ignore_ascii_case("dg_ssudbus\0")
     {
-        is_composite = true;
         device_devnode = parent;
+
+        // Try to parse the device interface number (MI_xx)
+        let inst_id_str = OsString::from_wide(this_dev_inst_id.as_ref()).to_ascii_lowercase();
+        let inst_id_str = inst_id_str.to_string_lossy();
+        if let Some(mut x) = inst_id_str.strip_prefix("usb\\vid_") {
+            if x.len() > 4 {
+                // Strip 4 hex digits after VID_
+                x = &x[4..];
+                if let Some(mut x) = x.strip_prefix("&pid_") {
+                    if x.len() > 4 {
+                        // Strip 4 hex digits after PID_
+                        x = &x[4..];
+                        if let Some(x) = x.strip_prefix("&mi_") {
+                            if x.len() > 2 {
+                                let iface_no = &x[..2];
+                                interface_no = u8::from_str_radix(iface_no, 16)
+                                    .map_err(|_| WinEnumerationError::CouldNotFindInterfaceNo)?;
+                            } else {
+                                return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+                            }
+                        } else {
+                            return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+                        }
+                    } else {
+                        return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+                    }
+                } else {
+                    return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+                }
+            } else {
+                return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+            }
+        } else {
+            return Err(WinEnumerationError::CouldNotFindInterfaceNo);
+        }
+        log::debug!(
+            "{:?} should be bInterfaceNumber {:02x}",
+            this_dev_inst_id,
+            interface_no
+        );
 
         // Look up one level _again_, and that should be the hub
         let mut devnode = 0;
@@ -687,140 +744,190 @@ fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerat
         }
         hub_devnode = devnode;
     } else {
-        is_composite = false;
+        interface_no = 0;
         device_devnode = devnode;
 
         // Assume/hope that the hub devnode is the parent devnode
         hub_devnode = parent;
     }
 
-    // Find the "location info" and parse it for the hub port
-    // This is apparently the only way to do it, the "Address" is apparently wrong
-    // https://github.com/dorssel/usbipd-win/issues/82
-    let loc_info = get_devnode_str_property(
+    // We want the instance ID (USB\...) of the whole device, for lookups
+    let whole_device_inst_id = get_devnode_str_property(
         device_devnode,
-        &DEVPKEY_Device_LocationInfo,
-        "DEVPKEY_Device_LocationInfo",
+        &DEVPKEY_Device_InstanceId,
+        "DEVPKEY_Device_InstanceId",
     )?;
     log::debug!(
-        "Device {:?} is located at {:?} on the hub",
+        "The instance ID for the whole device of {:?} is {:?}",
         crate::DbgU16(instance_path),
-        loc_info
+        whole_device_inst_id
     );
-    let loc_info = OsString::from_wide(loc_info.as_ref()).to_ascii_lowercase();
-    let loc_info = loc_info.to_string_lossy();
-    let hub_port;
-    if let Some(loc_info) = loc_info.strip_prefix("port_#") {
-        if let Some((port, _)) = loc_info.split_once('.') {
-            if let Ok(x) = u32::from_str_radix(port, 10) {
-                hub_port = x;
+
+    // We have something _useful_ now, so try to get access to the db
+    let mut db = db.lock().expect("Hotplug db mutex poisoned");
+    let WinHotplugDatabase {
+        ref mut next_session_id,
+        devices: ref mut db_devices,
+        ref mut path_to_device_map,
+    } = *db;
+
+    // Make a device exist
+    let whole_dev_inst_id_osstring = OsString::from_wide_null(whole_device_inst_id.as_ref());
+    let db_device = db_devices.entry(whole_dev_inst_id_osstring);
+    let need_to_probe_device_harder = match db_device {
+        hash_map::Entry::Occupied(_) => false,
+        hash_map::Entry::Vacant(_) => true,
+    };
+
+    if need_to_probe_device_harder {
+        log::debug!(
+            "This is apparently the first time we've seen {:?}, probing even harder",
+            whole_device_inst_id
+        );
+
+        // Find the "location info" and parse it for the hub port
+        // This is apparently the only way to do it, the "Address" is apparently wrong
+        // https://github.com/dorssel/usbipd-win/issues/82
+        let loc_info = get_devnode_str_property(
+            device_devnode,
+            &DEVPKEY_Device_LocationInfo,
+            "DEVPKEY_Device_LocationInfo",
+        )?;
+        log::debug!(
+            "Device {:?} is located at {:?} on the hub",
+            crate::DbgU16(instance_path),
+            loc_info
+        );
+        let loc_info = OsString::from_wide(loc_info.as_ref()).to_ascii_lowercase();
+        let loc_info = loc_info.to_string_lossy();
+        let hub_port;
+        if let Some(loc_info) = loc_info.strip_prefix("port_#") {
+            if let Some((port, _)) = loc_info.split_once('.') {
+                if let Ok(x) = u32::from_str_radix(port, 10) {
+                    hub_port = x;
+                } else {
+                    return Err(WinEnumerationError::CouldNotFindHub);
+                }
             } else {
                 return Err(WinEnumerationError::CouldNotFindHub);
             }
         } else {
             return Err(WinEnumerationError::CouldNotFindHub);
         }
-    } else {
-        return Err(WinEnumerationError::CouldNotFindHub);
-    }
-    log::debug!(
-        "Device {:?} is located at port {} on the hub",
-        crate::DbgU16(instance_path),
-        hub_port
-    );
+        log::debug!(
+            "Device {:?} is located at port {} on the hub",
+            crate::DbgU16(instance_path),
+            hub_port
+        );
 
-    // Need to turn this hub devnode *back* into an instance id
-    dbg!(hub_devnode);
-    let hub_inst_id = get_devnode_str_property(
-        hub_devnode,
-        &DEVPKEY_Device_InstanceId,
-        "DEVPKEY_Device_InstanceId",
-    )?;
-    log::debug!(
-        "Hoping that {:?} is the hub for {:?}",
-        hub_inst_id,
-        crate::DbgU16(instance_path)
-    );
+        // Need to turn this hub devnode *back* into an instance id
+        let hub_inst_id = get_devnode_str_property(
+            hub_devnode,
+            &DEVPKEY_Device_InstanceId,
+            "DEVPKEY_Device_InstanceId",
+        )?;
+        log::debug!(
+            "Hoping that {:?} is the hub for {:?}",
+            hub_inst_id,
+            crate::DbgU16(instance_path)
+        );
 
-    // And finally get an instance _path_ that refers to the hub
-    let hub_paths = find_instance_paths(&GUID_DEVINTERFACE_USB_HUB, &hub_inst_id)?;
-    if hub_paths.len() < 1 {
-        return Err(WinEnumerationError::CouldNotFindHub);
-    }
-    if hub_paths.len() > 1 {
-        log::warn!("More than one USB hub path found??");
-    }
-    let hub_path = &hub_paths[0];
-    log::debug!(
-        "Hoping that {:?} is the hub for {:?}",
-        hub_path,
-        crate::DbgU16(instance_path)
-    );
+        // And finally get an instance _path_ that refers to the hub
+        let hub_paths = find_instance_paths(&GUID_DEVINTERFACE_USB_HUB, &hub_inst_id)?;
+        if hub_paths.len() < 1 {
+            return Err(WinEnumerationError::CouldNotFindHub);
+        }
+        if hub_paths.len() > 1 {
+            log::warn!("More than one USB hub path found??");
+        }
+        let hub_path = &hub_paths[0];
+        log::debug!(
+            "Hoping that {:?} is the hub for {:?}",
+            hub_path,
+            crate::DbgU16(instance_path)
+        );
 
-    let hub_hfile = unsafe {
-        CreateFileW(
-            hub_path.as_ref().as_ptr(),
-            GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            ptr::null(),
-            OPEN_EXISTING,
+        let hub_hfile = unsafe {
+            CreateFileW(
+                hub_path.as_ref().as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        dbg!(hub_hfile);
+
+        let dev_desc = get_descritor(
+            hub_hfile,
+            hub_port,
+            usb_ch9::ch9_core::descriptor_types::DEVICE,
             0,
-            ptr::null_mut(),
-        )
-    };
-    dbg!(hub_hfile);
+            0,
+        );
+        dbg!(dev_desc);
 
-    let dev_desc = get_descritor(
-        hub_hfile,
-        hub_port,
-        usb_ch9::ch9_core::descriptor_types::DEVICE,
-        0,
-        0,
-    );
-    dbg!(dev_desc);
+        let asdf_desc = get_descritor(
+            hub_hfile,
+            hub_port,
+            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+            0,
+            0,
+        );
+        dbg!(asdf_desc);
+        let asdf_desc = get_descritor(
+            hub_hfile,
+            hub_port,
+            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+            1,
+            0,
+        );
+        dbg!(asdf_desc);
+        let asdf_desc = get_descritor(
+            hub_hfile,
+            hub_port,
+            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+            2,
+            0,
+        );
+        dbg!(asdf_desc);
 
-    let asdf_desc = get_descritor(
-        hub_hfile,
-        hub_port,
-        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-        0,
-        0,
-    );
-    dbg!(asdf_desc);
-    let asdf_desc = get_descritor(
-        hub_hfile,
-        hub_port,
-        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-        1,
-        0,
-    );
-    dbg!(asdf_desc);
-    let asdf_desc = get_descritor(
-        hub_hfile,
-        hub_port,
-        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-        2,
-        0,
-    );
-    dbg!(asdf_desc);
+        let asdf_desc = get_descritor(hub_hfile, hub_port, 0xaa, 0, 0);
+        dbg!(asdf_desc);
 
-    let asdf_desc = get_descritor(hub_hfile, hub_port, 0xaa, 0, 0);
-    dbg!(asdf_desc);
-
-    unsafe {
-        CloseHandle(hub_hfile);
+        unsafe {
+            CloseHandle(hub_hfile);
+        }
+    } else {
+        log::debug!("We've seen this device before, associating interface with it...");
     }
 
-    // //
+    // Now that we are _all_ probed out, we can insert information into the DB
+    let db_device = db_device.or_insert_with(|| {
+        let session_id = *next_session_id;
+        *next_session_id = session_id + 1;
+        DeviceState {
+            session_id,
+            interfaces: HashMap::new(),
+        }
+    });
+    let this_if_path = OsString::from_wide_null(instance_path);
+    db_device.interfaces.insert(interface_no, this_if_path);
 
-    // let mut child = 0;
-    // let ret = unsafe { CM_Get_Child(&mut child, devnode, 0) };
-    // dbg!(ret, child);
+    // Update the DB for unplug handling
+    let this_if_path = OsString::from_wide_null(instance_path);
+    let whole_dev_inst_id_osstring = OsString::from_wide_null(whole_device_inst_id.as_ref());
+    let orig = path_to_device_map.insert(this_if_path, whole_dev_inst_id_osstring);
+    if orig.is_some() {
+        log::warn!(
+            "Found interface path {:?} multiple times",
+            crate::DbgU16(instance_path)
+        );
+    }
 
-    // let driver = get_devnode_str_property(child, &DEVPKEY_Device_Service).unwrap();
-    // dbg!(OsString::from_wide(&driver));
-
-    Ok(())
+    Ok(Some(()))
 }
 
 unsafe extern "system" fn notify_cb(
@@ -832,10 +939,11 @@ unsafe extern "system" fn notify_cb(
 ) -> u32 {
     // NOTE: This function executes on a thread pool thread and not the main thread
     // We supposedly don't race here, see comment in Drop for WinNotificationHandler
-    let (tx, hevent) = unsafe {
+    let (tx, hevent, db) = unsafe {
         let tx = &((*(ctx as *const WinNotificationHandler)).tx);
+        let db = &((*(ctx as *const WinNotificationHandler)).database);
         let hevent = (*(ctx as *const WinNotificationHandler)).h_event;
-        (tx.clone(), hevent)
+        (tx.clone(), hevent, db)
     };
 
     let (guid, instance_path) = unsafe {
@@ -852,11 +960,10 @@ unsafe extern "system" fn notify_cb(
         (guid, std::slice::from_raw_parts(link_ptr, link_sz / 2))
     };
 
-    dbg!(action);
     dbg!(crate::DbgU16(instance_path));
 
     if action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL {
-        let ret = probe_new_device(guid, instance_path);
+        let ret = probe_new_device(db, guid, instance_path);
         if let Err(e) = ret {
             log::warn!("Enumerating device failed! {}", e);
         }
@@ -871,9 +978,38 @@ unsafe extern "system" fn notify_cb(
 }
 
 #[derive(Debug)]
+struct DeviceState {
+    session_id: u64,
+    /// Map from (primary) interface number (MI_xx) to device _path_
+    interfaces: HashMap<u8, OsString>,
+}
+
+#[derive(Debug)]
+struct WinHotplugDatabase {
+    next_session_id: u64,
+    /// Map from device instance ID (of the "whole" device) to state
+    devices: HashMap<OsString, DeviceState>,
+    /// Map from \\?\ paths to device instance IDs
+    ///
+    /// The point of this is to avoid flaky parsing, and this is used for
+    /// the unplug pathway
+    path_to_device_map: HashMap<OsString, OsString>,
+}
+impl WinHotplugDatabase {
+    fn new() -> Self {
+        Self {
+            next_session_id: 0,
+            devices: HashMap::new(),
+            path_to_device_map: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct WinNotificationHandler {
     h_notif: HCMNOTIFICATION,
     pub h_event: HANDLE,
+    database: Mutex<WinHotplugDatabase>,
     tx: mpsc::Sender<()>,
     rx: mpsc::Receiver<()>,
 }
@@ -926,6 +1062,7 @@ impl WinNotificationHandler {
         unsafe {
             (*self_).h_notif = h_notify_context;
             (*self_).h_event = event;
+            ptr::addr_of_mut!((*self_).database).write(Mutex::new(WinHotplugDatabase::new()));
             ptr::addr_of_mut!((*self_).tx).write(tx);
             ptr::addr_of_mut!((*self_).rx).write(rx);
         }
