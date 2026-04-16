@@ -2346,7 +2346,11 @@ impl USBDevice {
                             }
                             Err(err) => {
                                 log::debug!("Failed to open {:?}: {}", path, err);
-                                Err(protocol::Errors::TransferError)
+                                if err.kind() == io::ErrorKind::PermissionDenied {
+                                    Err(protocol::Errors::AlreadyClaimed)
+                                } else {
+                                    Err(protocol::Errors::TransferError)
+                                }
                             }
                         }
                     } else {
