@@ -602,7 +602,7 @@ fn probe_new_device(
     db: &Mutex<WinHotplugDatabase>,
     guid: GUID,
     instance_path: &[u16],
-) -> Result<Option<()>, WinEnumerationError> {
+) -> Result<Option<WinHotplugNotification>, WinEnumerationError> {
     // At the beginning here, we have an instance path (starts with \\?\) to _something_,
     // but we don't know anything else about it
     log::debug!(
@@ -795,6 +795,7 @@ fn probe_new_device(
         hash_map::Entry::Vacant(_) => true,
     };
 
+    let device_info;
     if need_to_probe_device_harder {
         log::debug!(
             "This is apparently the first time we've seen {:?}, probing even harder",
@@ -893,7 +894,6 @@ fn probe_new_device(
                 "failed to parse device descriptor",
             ))?
             .0;
-        dbg!(dev_desc);
 
         let mut config_descs = Vec::new();
         for cfg_i in 0..dev_desc.bNumConfigurations {
@@ -954,7 +954,6 @@ fn probe_new_device(
         }
         for cfg_desc in &config_descs {
             for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
-                dbg!(&desc);
                 match desc {
                     usb_ch9::DescriptorRef::Config(d) => {
                         if d.iConfiguration != 0 {
@@ -970,7 +969,6 @@ fn probe_new_device(
                 }
             }
         }
-        dbg!(string_table_cache);
 
         let bos_desc = if dev_desc.bcdUSB >= 0x0201 {
             let bos_desc = hub_handle.get_descriptor(15, 0, 0)?;
@@ -983,9 +981,16 @@ fn probe_new_device(
         } else {
             None
         };
-        dbg!(bos_desc);
+
+        device_info = Some(WinHotplugDeviceInfo {
+            dev_desc: *dev_desc,
+            config_descs,
+            bos_desc,
+            string_descs: string_table_cache,
+        })
     } else {
         log::debug!("We've seen this device before, associating interface with it...");
+        device_info = None;
     }
 
     // Now that we are _all_ probed out, we can insert information into the DB
@@ -1011,7 +1016,12 @@ fn probe_new_device(
         );
     }
 
-    Ok(Some(()))
+    Ok(Some(WinHotplugNotification::NewInterface {
+        session_id: db_device.session_id,
+        interface_no,
+        interface_path: OsString::from_wide_null(instance_path),
+        device_info,
+    }))
 }
 
 unsafe extern "system" fn notify_cb(
@@ -1044,18 +1054,91 @@ unsafe extern "system" fn notify_cb(
         (guid, std::slice::from_raw_parts(link_ptr, link_sz / 2))
     };
 
-    dbg!(crate::DbgU16(instance_path));
+    let notification;
+    match action {
+        CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL => {
+            match probe_new_device(db, guid, instance_path) {
+                Ok(Some(notif)) => notification = notif,
+                Ok(None) => {
+                    // The device was to be ignored
+                    return ERROR_SUCCESS;
+                }
+                Err(e) => {
+                    log::warn!("Enumerating device failed! {}", e);
+                    return ERROR_SUCCESS;
+                }
+            }
+        }
+        CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL => {
+            let mut db = db.lock().expect("Hotplug db mutex poisoned");
+            let WinHotplugDatabase {
+                next_session_id: _,
+                devices: ref mut db_devices,
+                ref mut path_to_device_map,
+            } = *db;
+            let this_if_path = OsString::from_wide_null(instance_path);
+            if let hash_map::Entry::Occupied(path_to_dev_entry) =
+                path_to_device_map.entry(this_if_path.clone())
+            {
+                log::debug!(
+                    "Unplugging interface {:?} of device {:?}",
+                    path_to_dev_entry.key(),
+                    path_to_dev_entry.get()
+                );
 
-    if action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL {
-        let ret = probe_new_device(db, guid, instance_path);
-        if let Err(e) = ret {
-            log::warn!("Enumerating device failed! {}", e);
+                if let hash_map::Entry::Occupied(mut dev_to_state_entry) =
+                    db_devices.entry(path_to_dev_entry.get().clone())
+                {
+                    let mut iface = None;
+                    for (iface_no, iface_path) in dev_to_state_entry.get().interfaces.iter() {
+                        if *iface_path == this_if_path {
+                            iface = Some(*iface_no);
+                            break;
+                        }
+                    }
+                    if let Some(iface) = iface {
+                        dev_to_state_entry.get_mut().interfaces.remove(&iface);
+                        notification = WinHotplugNotification::RemoveInterface {
+                            session_id: dev_to_state_entry.get().session_id,
+                            interface_no: iface,
+                            interface_path: this_if_path,
+                        };
+                        // Also wipe out _our_ state if appropriate
+                        if dev_to_state_entry.get().interfaces.len() == 0 {
+                            log::debug!(
+                                "Unplugging last interface of device {:?}",
+                                path_to_dev_entry.get()
+                            );
+                            dev_to_state_entry.remove();
+                        }
+                    } else {
+                        log::warn!("Unplugging an interface we don't have! {:?}", this_if_path);
+                        return ERROR_SUCCESS;
+                    }
+                } else {
+                    log::warn!(
+                        "Unplugging a device we don't have! {:?}",
+                        path_to_dev_entry.get()
+                    );
+                    return ERROR_SUCCESS;
+                }
+
+                path_to_dev_entry.remove();
+            } else {
+                // Don't care about this interface
+                return ERROR_SUCCESS;
+            }
+        }
+        _ => {
+            log::warn!("Unknown CfgMgr32 notification action {} ???", action);
+            return ERROR_SUCCESS;
         }
     }
 
-    tx.send(()).unwrap();
-    unsafe {
-        SetEvent(hevent);
+    if let Ok(_) = tx.send(notification) {
+        unsafe {
+            SetEvent(hevent);
+        }
     }
 
     ERROR_SUCCESS
@@ -1090,12 +1173,35 @@ impl WinHotplugDatabase {
 }
 
 #[derive(Debug)]
+pub struct WinHotplugDeviceInfo {
+    pub dev_desc: usb_ch9::ch9_core::DeviceDescriptor,
+    pub config_descs: Vec<Vec<u8>>,
+    pub bos_desc: Option<Vec<u8>>,
+    pub string_descs: HashMap<u8, Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub enum WinHotplugNotification {
+    NewInterface {
+        session_id: u64,
+        interface_no: u8,
+        interface_path: OsString,
+        device_info: Option<WinHotplugDeviceInfo>,
+    },
+    RemoveInterface {
+        session_id: u64,
+        interface_no: u8,
+        interface_path: OsString,
+    },
+}
+
+#[derive(Debug)]
 pub struct WinNotificationHandler {
     h_notif: HCMNOTIFICATION,
     pub h_event: HANDLE,
     database: Mutex<WinHotplugDatabase>,
-    tx: mpsc::Sender<()>,
-    rx: mpsc::Receiver<()>,
+    tx: mpsc::Sender<WinHotplugNotification>,
+    rx: mpsc::Receiver<WinHotplugNotification>,
 }
 impl WinNotificationHandler {
     // Takes a pinned raw pointer to an *uninitialized* Self
@@ -1150,6 +1256,10 @@ impl WinNotificationHandler {
             ptr::addr_of_mut!((*self_).tx).write(tx);
             ptr::addr_of_mut!((*self_).rx).write(rx);
         }
+    }
+
+    pub fn get_notif(&self) -> WinHotplugNotification {
+        self.rx.recv().unwrap()
     }
 }
 impl Drop for WinNotificationHandler {

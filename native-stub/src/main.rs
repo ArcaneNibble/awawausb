@@ -3014,7 +3014,8 @@ impl USBStubEngine {
                 }
             }
             1 => {
-                dbg!("got notification event!");
+                let hotplug_notif = self.notifcation_handler.get_notif();
+                dbg!(hotplug_notif);
             }
             _ => {}
         }
