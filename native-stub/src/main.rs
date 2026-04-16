@@ -2100,7 +2100,10 @@ impl USBDevice {
     }
 
     fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+        log::debug!("device reset (dummy), sid = {}, txn = {}", sid, txn_id);
+        // Windows is unable to reset the device
+        Err(protocol::Errors::TransferError)
     }
 
     fn set_configuration(
@@ -2108,9 +2111,17 @@ impl USBDevice {
         sid: u64,
         txn_id: &str,
         value: u8,
-        engine: Pin<&USBStubEngine>,
+        _engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+        log::debug!(
+            "device set config (dummy) 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+        // Windows is unable to change the device configuration
+        Err(protocol::Errors::TransferError)
     }
 
     fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
