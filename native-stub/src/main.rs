@@ -66,9 +66,9 @@ use enum_windows::*;
 use windows_sys::Win32::System::Threading::*;
 
 #[cfg(windows)]
-pub struct NullU16Path(pub Vec<u16>);
+pub struct NullU16(Vec<u16>);
 #[cfg(windows)]
-impl From<&[u16]> for NullU16Path {
+impl From<&[u16]> for NullU16 {
     fn from(value: &[u16]) -> Self {
         let mut ret = value.to_owned();
         if ret.last() != Some(&0) {
@@ -78,7 +78,34 @@ impl From<&[u16]> for NullU16Path {
     }
 }
 #[cfg(windows)]
-impl Debug for NullU16Path {
+impl From<Vec<u16>> for NullU16 {
+    fn from(mut value: Vec<u16>) -> Self {
+        if value.last() != Some(&0) {
+            value.push(0);
+        }
+        Self(value)
+    }
+}
+#[cfg(windows)]
+impl From<NullU16> for Vec<u16> {
+    fn from(value: NullU16) -> Self {
+        value.0
+    }
+}
+#[cfg(windows)]
+impl AsRef<[u16]> for NullU16 {
+    fn as_ref(&self) -> &[u16] {
+        &self.0
+    }
+}
+#[cfg(windows)]
+impl AsMut<[u16]> for NullU16 {
+    fn as_mut(&mut self) -> &mut [u16] {
+        &mut self.0
+    }
+}
+#[cfg(windows)]
+impl Debug for NullU16 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let str = OsString::from_wide(&self.0[..self.0.len() - 1]);
         str.fmt(f)
