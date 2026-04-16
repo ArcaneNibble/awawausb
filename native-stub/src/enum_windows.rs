@@ -716,6 +716,7 @@ fn probe_winusb_device_further(
         get_devnode_str_property(parent, &DEVPKEY_Device_Service, "DEVPKEY_Device_Service")?;
     let parent_driver = OsString::from_wide(parent_driver.as_ref());
 
+    let is_composite;
     let interface_no;
     let device_devnode;
     let hub_devnode;
@@ -723,6 +724,7 @@ fn probe_winusb_device_further(
         // some workaround for some Samsung devices??
         || parent_driver.eq_ignore_ascii_case("dg_ssudbus\0")
     {
+        is_composite = true;
         device_devnode = parent;
 
         // Try to parse the device interface number (MI_xx)
@@ -773,6 +775,7 @@ fn probe_winusb_device_further(
         }
         hub_devnode = devnode;
     } else {
+        is_composite = false;
         interface_no = 0;
         device_devnode = devnode;
 
@@ -1057,6 +1060,7 @@ fn probe_winusb_device_further(
         session_id: db_device.session_id,
         interface_no,
         interface_path: OsString::from_wide_null(instance_path),
+        whole_device: !is_composite,
         device_info,
     }))
 }
@@ -1336,6 +1340,7 @@ pub enum WinHotplugNotification {
         session_id: u64,
         interface_no: u8,
         interface_path: OsString,
+        whole_device: bool,
         device_info: Option<WinHotplugDeviceInfo>,
     },
     RemoveInterface {

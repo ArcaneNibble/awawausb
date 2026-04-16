@@ -192,6 +192,10 @@ pub struct USBDevice {
     ///
     /// Different interfaces cannot use the same endpoints
     pub ep_to_idx: HashMap<(u8, u8), u8>,
+    /// Map from bInterfaceNumber to bInterfaceNumber
+    ///
+    /// This is only actually used on Windows
+    pub iad_map: HashMap<u8, u8>,
 
     pub opened: bool,
     pub current_configuration_id: u8,
@@ -259,6 +263,8 @@ impl USBDevice {
     }
 
     pub(crate) fn reformat_config_descriptors(&mut self, create_iface_dummy_info: bool) {
+        // FIXME: This is only stored for the active config
+        let mut iad_map = HashMap::new();
         let mut ep_to_idx = HashMap::new();
         let mut configs = Vec::new();
         for cfg_desc in &self.config_descriptors {
@@ -307,6 +313,11 @@ impl USBDevice {
                                             e.insert(USBInterfaceState {
                                                 alt_setting: 0,
                                                 claimed: false,
+                                                // These cannot occur, but must be present
+                                                #[cfg(target_os = "macos")]
+                                                _macos_iface_idx: 0,
+                                                #[cfg(target_os = "macos")]
+                                                _macos_ep_addrs: Vec::new(),
                                             });
                                         } else {
                                             log::warn!(
@@ -376,6 +387,26 @@ impl USBDevice {
                             )
                         }
                     }
+                    usb_ch9::DescriptorRef::IAD(d) => {
+                        if let Some(this_config_desc) = &mut this_config_desc {
+                            if this_config_desc.bConfigurationValue == self.current_configuration_id
+                            {
+                                for if_no in
+                                    d.bFirstInterface..d.bFirstInterface + d.bInterfaceCount
+                                {
+                                    let orig = iad_map.insert(if_no, d.bFirstInterface);
+                                    if orig.is_some() && orig != Some(d.bFirstInterface) {
+                                        log::warn!("Overlapping IAD? {:?}", d)
+                                    }
+                                }
+                            }
+                        } else {
+                            log::warn!(
+                                "Bogus interface association descriptor without config descriptor? {:?}",
+                                desc
+                            )
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -395,6 +426,7 @@ impl USBDevice {
 
         self.reformatted_config_descriptors = configs;
         self.ep_to_idx = ep_to_idx;
+        self.iad_map = iad_map;
     }
 
     fn _check_open(&self) -> Result<(), protocol::Errors> {
@@ -555,6 +587,7 @@ impl USBDevice {
 
             reformatted_config_descriptors: Vec::new(),
             ep_to_idx: HashMap::new(),
+            iad_map: HashMap::new(),
 
             opened: false,
             current_configuration_id: current_config,
@@ -1308,6 +1341,7 @@ impl USBDevice {
 
             reformatted_config_descriptors: Vec::new(),
             ep_to_idx: HashMap::new(),
+            iad_map: HashMap::new(),
 
             opened: false,
             current_configuration_id: current_config,
@@ -1931,6 +1965,7 @@ impl USBDevice {
             session_id,
             interface_no,
             interface_path,
+            whole_device,
             device_info,
         } = notif
         {
@@ -2020,6 +2055,7 @@ impl USBDevice {
 
                 reformatted_config_descriptors: Vec::new(),
                 ep_to_idx: HashMap::new(),
+                iad_map: HashMap::new(),
 
                 opened: false,
                 current_configuration_id: dev_info.current_config,
@@ -2034,6 +2070,19 @@ impl USBDevice {
             dev._win_ifaces.insert(interface_no, interface_path);
 
             dev.reformat_config_descriptors(true);
+
+            // If we have the whole device, rewrite the IAD map so that *everything* maps to 0
+            if whole_device {
+                let mut iad_map = HashMap::new();
+                for cfg_desc in &dev.reformatted_config_descriptors {
+                    if cfg_desc.bConfigurationValue == dev.current_configuration_id {
+                        for if_desc in &cfg_desc.interfaces {
+                            iad_map.insert(if_desc.bInterfaceNumber, 0);
+                        }
+                    }
+                }
+                dev.iad_map = iad_map;
+            }
 
             // At the *very* end, we can send this
             dev.send_plug_notification(session_id, engine);

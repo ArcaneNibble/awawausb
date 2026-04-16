@@ -38,6 +38,7 @@ pub enum DescriptorRef<'a> {
     String(&'a ch9_core::StringDescriptor),
     Interface(&'a ch9_core::InterfaceDescriptor),
     Endpoint(&'a ch9_core::EndpointDescriptor),
+    IAD(&'a interface_association_descriptor::InterfaceAssociationDescriptor),
     UnknownDescriptor(&'a [u8]),
 }
 
@@ -71,6 +72,10 @@ impl<'a> Iterator for ParseDescriptorSet<'a> {
                 ch9_core::descriptor_types::ENDPOINT => {
                     let (desc, rest) = ch9_core::EndpointDescriptor::from_bytes(self.0)?;
                     (DescriptorRef::Endpoint(desc), rest)
+                }
+                interface_association_descriptor::DESC_TYPE_IAD => {
+                    let (desc, rest) = interface_association_descriptor::InterfaceAssociationDescriptor::from_bytes(self.0)?;
+                    (DescriptorRef::IAD(desc), rest)
                 }
                 _ => {
                     let len = generic_desc.bLength as usize;
