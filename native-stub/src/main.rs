@@ -209,8 +209,9 @@ pub struct USBDevice {
     /// Map from bInterfaceNumber to *path*
     #[cfg(windows)]
     _win_iface_paths: HashMap<u8, OsString>,
+    /// Map from bInterfaceNumber to (refcount, handles)
     #[cfg(windows)]
-    _win_iface_handles: HashMap<u8, WinUSBHandle>,
+    _win_iface_handles: HashMap<u8, (usize, WinUSBHandle)>,
     // Windows caches these *before* we ever set up
     #[cfg(windows)]
     _win_string_cache: HashMap<u8, Vec<u8>>,
@@ -2179,7 +2180,7 @@ impl USBDevice {
             if let Some((if_no, handle)) = self._open_some_interface(engine) {
                 // Open successful
                 log::debug!("Opened interface {:02x}", if_no);
-                self._win_iface_handles.insert(if_no, handle);
+                self._win_iface_handles.insert(if_no, (1, handle));
                 self.opened = true;
                 Ok(DeviceOpResult::SendCompletionNow)
             } else {
@@ -2194,7 +2195,38 @@ impl USBDevice {
     }
 
     fn close_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+
+        log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
+
+        // Release all interfaces
+        let claimed_ifs = self.current_if_state.keys().map(|x| *x).collect::<Vec<_>>();
+        for iface in claimed_ifs {
+            dbg!(iface);
+            self.release_interface(sid, txn_id, iface)?;
+        }
+        dbg!(&self._win_iface_handles);
+
+        // Release all interfaces including the secret one
+        for (if_no, (refcount, _handle)) in self._win_iface_handles.drain() {
+            if refcount != 1 {
+                log::warn!(
+                    "Somehow there's an extra ref on interface {:02x}, sid = {}, txn = {}",
+                    if_no,
+                    sid,
+                    txn_id
+                );
+            }
+            log::debug!(
+                "closing interface {:02x}, sid = {}, txn = {}",
+                if_no,
+                sid,
+                txn_id
+            );
+        }
+
+        self.opened = false;
+        Ok(DeviceOpResult::SendCompletionNow)
     }
 
     fn reset_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
@@ -2264,7 +2296,7 @@ impl USBDevice {
                 value = *mapped_if;
             }
             match self._win_iface_handles.entry(value) {
-                hash_map::Entry::Occupied(_) => {
+                hash_map::Entry::Occupied(mut entry) => {
                     // The interface is already opened, so now we claim it "for real"
                     // (this can happen with IADs)
                     log::debug!(
@@ -2272,6 +2304,7 @@ impl USBDevice {
                         sid,
                         txn_id
                     );
+                    entry.get_mut().0 += 1;
                     iface_state.claimed = true;
                     Ok(DeviceOpResult::SendCompletionNow)
                 }
@@ -2299,7 +2332,7 @@ impl USBDevice {
                                     return Err(protocol::Errors::TransferError);
                                 }
                                 // Successfully claimed!
-                                self._win_iface_handles.insert(value, handle);
+                                entry.insert((1, handle));
                                 iface_state.claimed = true;
                                 Ok(DeviceOpResult::SendCompletionNow)
                             }
@@ -2316,8 +2349,49 @@ impl USBDevice {
         }
     }
 
-    fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
-        todo!()
+    fn release_interface(&mut self, sid: u64, txn_id: &str, mut value: u8) -> DeviceResult {
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device release interface 0x{:02x}, sid = {}, txn = {}",
+            value,
+            sid,
+            txn_id
+        );
+
+        if let Some(mapped_if) = self.iad_map.get(&value) {
+            value = *mapped_if;
+        }
+
+        let iface_obj = self._win_iface_handles.entry(value);
+        match iface_obj {
+            hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().0 -= 1;
+                if entry.get().0 == 0 {
+                    log::debug!(
+                        "Actually closing interface, sid = {}, txn = {}",
+                        sid,
+                        txn_id
+                    );
+                    entry.remove();
+                }
+
+                // Release interface successful
+                iface_state.claimed = false;
+                Ok(DeviceOpResult::SendCompletionNow)
+            }
+            hash_map::Entry::Vacant(_) => {
+                panic!("interface is claimed, but we don't have the handle!")
+            }
+        }
     }
 
     fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
@@ -2451,7 +2525,7 @@ impl USBDevice {
             } else {
                 self._check_open()?;
                 // Just pick the first handle that pops out
-                interface_handle = self._win_iface_handles.values_mut().next().unwrap();
+                interface_handle = &mut self._win_iface_handles.values_mut().next().unwrap().1;
             }
         }
 
