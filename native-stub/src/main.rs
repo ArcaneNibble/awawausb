@@ -3008,14 +3008,18 @@ impl USBStubEngine {
 
         match wait_result {
             0 => {
-                let cont = self.handle_stdin();
-                if !cont {
-                    return false;
+                // FIXME: This peek mechanism is a hack
+                while self.stdin_reader.peek_stdin() {
+                    let cont = self.handle_stdin();
+                    if !cont {
+                        return false;
+                    }
                 }
             }
             1 => {
-                let hotplug_notif = self.notifcation_handler.get_notif();
-                dbg!(hotplug_notif);
+                while let Some(hotplug_notif) = self.notifcation_handler.get_notif() {
+                    dbg!(hotplug_notif);
+                }
             }
             _ => {}
         }

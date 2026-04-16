@@ -1261,8 +1261,11 @@ impl WinNotificationHandler {
         }
     }
 
-    pub fn get_notif(&self) -> WinHotplugNotification {
-        self.rx.recv().unwrap()
+    pub fn get_notif(&self) -> Option<WinHotplugNotification> {
+        match self.rx.try_recv() {
+            Ok(notif) => Some(notif),
+            Err(_) => None,
+        }
     }
 }
 impl Drop for WinNotificationHandler {

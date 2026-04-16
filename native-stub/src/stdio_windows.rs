@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::io;
 use std::ptr;
 use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
 use std::thread;
 
 use windows_sys::Win32::Foundation::*;
@@ -79,6 +81,7 @@ fn stdin_read_thread(event: usize, tx: mpsc::Sender<io::Result<Vec<u8>>>) {
 pub struct WinStdinReader {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,
     pub event: HANDLE,
+    _peeked_message: RefCell<Option<io::Result<Vec<u8>>>>,
 }
 impl WinStdinReader {
     pub fn new() -> Self {
@@ -94,16 +97,33 @@ impl WinStdinReader {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || stdin_read_thread(event2, tx));
 
-        Self { rx, event }
+        Self {
+            rx,
+            event,
+            _peeked_message: RefCell::new(None),
+        }
+    }
+
+    /// Check if there are any more messages on stdin
+    pub fn peek_stdin(&self) -> bool {
+        let mut peeked_message = self._peeked_message.borrow_mut();
+        assert!(peeked_message.is_none(), "peeking while we have a message!");
+        match self.rx.try_recv() {
+            Ok(data) => {
+                *peeked_message = Some(data);
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                *peeked_message = Some(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
+                true
+            }
+        }
     }
 
     /// Reads a message from stdin
     pub fn read_stdin_msg(&self) -> io::Result<Vec<u8>> {
-        if let Ok(data) = self.rx.recv() {
-            data
-        } else {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
+        self._peeked_message.take().expect("didn't peek messages!")
     }
 }
 impl Drop for WinStdinReader {
