@@ -1,3 +1,4 @@
+use std::alloc::Layout;
 use std::error;
 use std::ffi::{OsString, c_void};
 use std::fmt::{Debug, Display};
@@ -14,11 +15,36 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Registry::{REG_MULTI_SZ, REG_SZ};
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::core::*;
 
 use crate::NullU16;
+
+#[repr(C, packed(1))]
+#[allow(non_snake_case)]
+struct USB_DESCRIPTOR_REQUEST_WORKS {
+    ConnectionIndex: u32,
+    bmRequest: u8,
+    bRequest: u8,
+    wValue: u16,
+    wIndex: u16,
+    wLength: u16,
+    data: [u8],
+}
+
+#[repr(C, packed(1))]
+#[allow(non_snake_case)]
+struct USB_DESCRIPTOR_REQUEST_INITIAL {
+    ConnectionIndex: u32,
+    bmRequest: u8,
+    bRequest: u8,
+    wValue: u16,
+    wIndex: u16,
+    wLength: u16,
+    data: [u8; 4],
+}
 
 struct UnfuckedGUID(GUID);
 impl Debug for UnfuckedGUID {
@@ -48,6 +74,7 @@ impl Eq for UnfuckedGUID {}
 #[derive(Debug)]
 pub enum WinEnumerationError {
     CfgMgr32Error(CfgMgrError),
+    IoError(io::Error),
     UnexpectedPropertyType(&'static str),
     CouldNotFindHub,
 }
@@ -55,6 +82,7 @@ impl error::Error for WinEnumerationError {
     fn cause(&self) -> Option<&dyn error::Error> {
         match self {
             Self::CfgMgr32Error(e) => Some(e),
+            Self::IoError(e) => Some(e),
             _ => None,
         }
     }
@@ -63,6 +91,7 @@ impl Display for WinEnumerationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CfgMgr32Error(e) => write!(f, "CfgMgr32 returned {}", e),
+            Self::IoError(e) => write!(f, "I/O error {}", e),
             Self::UnexpectedPropertyType(msg) => {
                 write!(f, "tried to read {} but it had the wrong type", msg)
             }
@@ -73,6 +102,11 @@ impl Display for WinEnumerationError {
 impl From<CfgMgrError> for WinEnumerationError {
     fn from(value: CfgMgrError) -> Self {
         Self::CfgMgr32Error(value)
+    }
+}
+impl From<io::Error> for WinEnumerationError {
+    fn from(value: io::Error) -> Self {
+        Self::IoError(value)
     }
 }
 
@@ -446,6 +480,105 @@ fn get_dev_inst_id(instance_path: &[u16]) -> Result<Vec<u16>, WinEnumerationErro
     Ok(buf)
 }
 
+fn get_descritor(
+    h_hub: HANDLE,
+    hub_port: u32,
+    desc_ty: u8,
+    desc_idx: u8,
+    w_index: u16,
+) -> Result<Option<Vec<u8>>, io::Error> {
+    let is_reading_cfg_desc = desc_ty == usb_ch9::ch9_core::descriptor_types::CONFIGURATION;
+
+    // Do an initial read to see how big the descriptor is
+    let mut rbytes = 0;
+    let mut initial_desc = USB_DESCRIPTOR_REQUEST_INITIAL {
+        ConnectionIndex: hub_port,
+        bmRequest: 0,
+        bRequest: 0,
+        wValue: ((desc_ty as u16) << 8) | (desc_idx as u16),
+        wIndex: w_index,
+        wLength: if is_reading_cfg_desc { 4 } else { 2 },
+        data: [0; 4],
+    };
+
+    let ret = unsafe {
+        DeviceIoControl(
+            h_hub,
+            IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
+            &mut initial_desc as *mut _ as *mut c_void,
+            mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
+            &mut initial_desc as *mut _ as *mut c_void,
+            mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
+            &mut rbytes,
+            ptr::null_mut(),
+        )
+    };
+    if ret == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error().unwrap() as u32 == ERROR_GEN_FAILURE {
+            // This seems to be the error returned for invalid descriptor fetches
+            return Ok(None);
+        }
+        return Err(err);
+    }
+
+    // Check bDescriptorType against what we asked for
+    if initial_desc.data[1] != desc_ty {
+        return Ok(None);
+    }
+
+    // Get the actual length to read
+    let actual_len = if is_reading_cfg_desc {
+        // wTotalLength
+        (initial_desc.data[2] as usize) | ((initial_desc.data[3] as usize) << 8)
+    } else {
+        // bLength
+        initial_desc.data[0] as usize
+    };
+
+    // Now allocate a buffer of the appropriate size
+    let ref_layout = Layout::new::<USB_DESCRIPTOR_REQUEST_INITIAL>();
+    let wanted_layout =
+        Layout::from_size_align(ref_layout.size() - 4 + actual_len, ref_layout.align()).unwrap();
+    let buf = unsafe {
+        let buf = std::alloc::alloc_zeroed(wanted_layout);
+
+        #[repr(C)]
+        struct FatPointer {
+            ptr: *mut u8,
+            sz: usize,
+        }
+
+        mem::transmute::<_, &mut USB_DESCRIPTOR_REQUEST_WORKS>(FatPointer {
+            ptr: buf,
+            sz: actual_len,
+        })
+    };
+    buf.ConnectionIndex = hub_port;
+    buf.wValue = ((desc_ty as u16) << 8) | (desc_idx as u16);
+    buf.wIndex = w_index;
+    buf.wLength = actual_len as u16;
+
+    // Issue the _real_ request now
+    let ret = unsafe {
+        DeviceIoControl(
+            h_hub,
+            IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
+            buf as *mut _ as *mut c_void,
+            mem::size_of_val(buf) as u32,
+            buf as *mut _ as *mut c_void,
+            mem::size_of_val(buf) as u32,
+            &mut rbytes,
+            ptr::null_mut(),
+        )
+    };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(Some(buf.data.to_owned()))
+}
+
 fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerationError> {
     // At the beginning here, we have an instance path (starts with \\?\) to _something_,
     // but we don't know anything else about it
@@ -636,6 +769,43 @@ fn probe_new_device(guid: GUID, instance_path: &[u16]) -> Result<(), WinEnumerat
         )
     };
     dbg!(hub_hfile);
+
+    let dev_desc = get_descritor(
+        hub_hfile,
+        hub_port,
+        usb_ch9::ch9_core::descriptor_types::DEVICE,
+        0,
+        0,
+    );
+    dbg!(dev_desc);
+
+    let asdf_desc = get_descritor(
+        hub_hfile,
+        hub_port,
+        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+        0,
+        0,
+    );
+    dbg!(asdf_desc);
+    let asdf_desc = get_descritor(
+        hub_hfile,
+        hub_port,
+        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+        1,
+        0,
+    );
+    dbg!(asdf_desc);
+    let asdf_desc = get_descritor(
+        hub_hfile,
+        hub_port,
+        usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+        2,
+        0,
+    );
+    dbg!(asdf_desc);
+
+    let asdf_desc = get_descritor(hub_hfile, hub_port, 0xaa, 0, 0);
+    dbg!(asdf_desc);
 
     unsafe {
         CloseHandle(hub_hfile);
