@@ -723,7 +723,13 @@ impl USBDevice {
         }
     }
 
-    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+    fn claim_interface(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        value: u8,
+        _engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
         self._check_open()?;
 
         let iface_state = self
@@ -1579,7 +1585,13 @@ impl USBDevice {
         }
     }
 
-    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
+    fn claim_interface(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        value: u8,
+        _engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
         self._check_open()?;
 
         let iface_state = self
@@ -2210,8 +2222,98 @@ impl USBDevice {
         Err(protocol::Errors::TransferError)
     }
 
-    fn claim_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
-        todo!()
+    fn claim_interface(
+        &mut self,
+        sid: u64,
+        txn_id: &str,
+        mut value: u8,
+        engine: Pin<&USBStubEngine>,
+    ) -> DeviceResult {
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&value)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if iface_state.claimed {
+            log::debug!(
+                "Claiming already claimed interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+            Ok(DeviceOpResult::SendCompletionNow)
+        } else {
+            log::debug!(
+                "device claim interface 0x{:02x}, sid = {}, txn = {}",
+                value,
+                sid,
+                txn_id
+            );
+
+            if let Some(mapped_if) = self.iad_map.get(&value) {
+                if value != *mapped_if {
+                    log::debug!(
+                        "Mapping interface {:02x} -> {:02x}, sid = {}, txn = {}",
+                        value,
+                        mapped_if,
+                        sid,
+                        txn_id
+                    );
+                }
+                value = *mapped_if;
+            }
+            match self._win_iface_handles.entry(value) {
+                hash_map::Entry::Occupied(_) => {
+                    // The interface is already opened, so now we claim it "for real"
+                    // (this can happen with IADs)
+                    log::debug!(
+                        "Interface in fact open already, sid = {}, txn = {}",
+                        sid,
+                        txn_id
+                    );
+                    iface_state.claimed = true;
+                    Ok(DeviceOpResult::SendCompletionNow)
+                }
+                hash_map::Entry::Vacant(entry) => {
+                    if let Some(path) = self._win_iface_paths.get(&value) {
+                        log::debug!(
+                            "Attempting to open {:?}, sid = {}, txn = {}",
+                            path,
+                            sid,
+                            txn_id
+                        );
+                        match WinUSBHandle::open(path) {
+                            Ok(handle) => {
+                                let ret = unsafe {
+                                    windows_sys::Win32::System::IO::CreateIoCompletionPort(
+                                        handle.raw_handle,
+                                        engine.iocp,
+                                        0,
+                                        0,
+                                    )
+                                };
+                                if ret.is_null() {
+                                    let err = io::Error::last_os_error();
+                                    log::warn!("Failed to associate IOCP! {}", err);
+                                    return Err(protocol::Errors::TransferError);
+                                }
+                                // Successfully claimed!
+                                self._win_iface_handles.insert(value, handle);
+                                iface_state.claimed = true;
+                                Ok(DeviceOpResult::SendCompletionNow)
+                            }
+                            Err(err) => {
+                                log::debug!("Failed to open {:?}: {}", path, err);
+                                Err(protocol::Errors::TransferError)
+                            }
+                        }
+                    } else {
+                        Err(protocol::Errors::InvalidNumber)
+                    }
+                }
+            }
+        }
     }
 
     fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
@@ -2783,7 +2885,7 @@ impl USBStubEngine {
                     .get_mut(&sid)
                     .ok_or(protocol::Errors::DeviceNotFound)?;
 
-                usb_dev.claim_interface(sid, &txn_id, value)
+                usb_dev.claim_interface(sid, &txn_id, value, self)
             }
             protocol::RequestMessage::ReleaseInterface { sid, txn_id, value } => {
                 let sid = sid.parse::<u64>().expect("received malformed request");
