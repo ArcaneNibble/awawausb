@@ -83,6 +83,7 @@ pub enum WinEnumerationError {
     UnexpectedPropertyType(&'static str),
     CouldNotFindHub,
     CouldNotFindInterfaceNo,
+    CouldNotFindWinUSBGUID,
     DescriptorParsingProblem(&'static str),
 }
 impl error::Error for WinEnumerationError {
@@ -104,6 +105,9 @@ impl Display for WinEnumerationError {
             }
             Self::CouldNotFindHub => write!(f, "Could not find the hub owning the device"),
             Self::CouldNotFindInterfaceNo => write!(f, "Could not figure out the interface number"),
+            Self::CouldNotFindWinUSBGUID => {
+                write!(f, "Couldn't find a working WinUSB GUID (initial probe)")
+            }
             Self::DescriptorParsingProblem(msg) => {
                 write!(f, "Could not deal with device's descriptors: {}", msg)
             }
@@ -263,10 +267,7 @@ fn multi_sz_to_list(inp: &[u16]) -> Vec<NullU16> {
     ret
 }
 
-pub fn find_instance_paths(
-    guid: &GUID,
-    dev_inst_id: &NullU16,
-) -> Result<Vec<NullU16>, CfgMgrError> {
+fn find_instance_paths(guid: &GUID, dev_inst_id: &NullU16) -> Result<Vec<NullU16>, CfgMgrError> {
     loop {
         let mut list_sz = 0;
         let ret = unsafe {
@@ -691,6 +692,15 @@ fn probe_new_device(
         return Ok(None);
     }
 
+    probe_winusb_device_further(db, devnode, this_dev_inst_id, instance_path)
+}
+
+fn probe_winusb_device_further(
+    db: &Mutex<WinHotplugDatabase>,
+    devnode: u32,
+    this_dev_inst_id: NullU16,
+    instance_path: &[u16],
+) -> Result<Option<WinHotplugNotification>, WinEnumerationError> {
     log::debug!("Probing further into {:?}", crate::DbgU16(instance_path));
 
     // Now we want to check the parent device, to see if we're part of a composite device.
@@ -1051,6 +1061,118 @@ fn probe_new_device(
     }))
 }
 
+fn get_existing_usb_device_instances() -> Result<Vec<NullU16>, CfgMgrError> {
+    loop {
+        let mut list_sz = 0;
+        let ret = unsafe {
+            CM_Get_Device_ID_List_SizeW(
+                &mut list_sz,
+                windows_strings::w!("USB").as_ptr(),
+                CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT,
+            )
+        };
+        if ret != CR_SUCCESS {
+            return Err(CfgMgrError::from(ret).into());
+        }
+
+        let mut buf = vec![0; list_sz as usize];
+        let ret = unsafe {
+            CM_Get_Device_ID_ListW(
+                windows_strings::w!("USB").as_ptr(),
+                buf.as_mut_ptr(),
+                list_sz,
+                CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT,
+            )
+        };
+        if ret == CR_BUFFER_SMALL {
+            continue;
+        }
+        if ret != CR_SUCCESS {
+            return Err(CfgMgrError::from(ret).into());
+        }
+
+        return Ok(multi_sz_to_list(&buf));
+    }
+}
+
+fn try_probe_existing_device(
+    db: &Mutex<WinHotplugDatabase>,
+    existing_dev_inst: NullU16,
+) -> Result<Option<WinHotplugNotification>, WinEnumerationError> {
+    // Turn this into a devnode (a u32), which we can _actually_ use to query CfgMgr32
+    let mut devnode = 0;
+    let ret = unsafe {
+        CM_Locate_DevNodeW(
+            &mut devnode,
+            existing_dev_inst.as_ref().as_ptr(),
+            CM_LOCATE_DEVNODE_NORMAL,
+        )
+    };
+    if ret != CR_SUCCESS {
+        return Err(CfgMgrError::from(ret).into());
+    }
+
+    // Now we check if this is actually a WinUSB device
+    let driver =
+        get_devnode_str_property(devnode, &DEVPKEY_Device_Service, "DEVPKEY_Device_Service")?;
+
+    let driver = OsString::from_wide(driver.as_ref());
+    if !driver.eq_ignore_ascii_case("WinUSB\0") {
+        return Ok(None);
+    }
+    log::debug!(
+        "Initial probing {:?} which is a WinUSB instance",
+        existing_dev_inst
+    );
+
+    // We *definitely* have a WinUSB device now, so we need to find its device interface GUIDs.
+    // We then pick the first one that works.
+
+    let mut possible_guids = Vec::new();
+
+    if let Ok(dev_iface_guids) = get_devnode_custom_multi_str_property(
+        devnode,
+        windows_strings::w!("DeviceInterfaceGUIDs"),
+        "DeviceInterfaceGUIDs",
+    ) {
+        for guid in dev_iface_guids {
+            if let Some(guid) = try_parse_guid(&guid) {
+                possible_guids.push(UnfuckedGUID(guid));
+            }
+        }
+    }
+    if let Ok(dev_iface_guid) = get_devnode_custom_str_property(
+        devnode,
+        windows_strings::w!("DeviceInterfaceGUID"),
+        "DeviceInterfaceGUID",
+    ) {
+        if let Some(guid) = try_parse_guid(&dev_iface_guid) {
+            possible_guids.push(UnfuckedGUID(guid));
+        }
+    }
+
+    for x in &possible_guids {
+        log::debug!("Registered WinUSB GUID: {:?}", x);
+    }
+
+    // Try to find some instance path that works
+    let mut instance_path = None;
+    let mut instance_paths;
+    for winusb_guid in possible_guids {
+        instance_paths = find_instance_paths(&winusb_guid.0, &existing_dev_inst)?;
+        if instance_paths.len() > 0 {
+            instance_path = Some(&instance_paths[0]);
+            break;
+        }
+    }
+    if instance_path.is_none() {
+        return Err(WinEnumerationError::CouldNotFindWinUSBGUID);
+    }
+    let instance_path = instance_path.unwrap();
+
+    probe_winusb_device_further(db, devnode, existing_dev_inst, instance_path.as_ref())
+}
+
 unsafe extern "system" fn notify_cb(
     _hnotify: HCMNOTIFICATION,
     ctx: *const std::ffi::c_void,
@@ -1284,6 +1406,23 @@ impl WinNotificationHandler {
             ptr::addr_of_mut!((*self_).tx).write(tx);
             ptr::addr_of_mut!((*self_).rx).write(rx);
         }
+    }
+
+    pub fn probe_existing(&self) -> Result<Vec<WinHotplugNotification>, WinEnumerationError> {
+        let existing_dev_insts = get_existing_usb_device_instances()?;
+        let mut probe_results = Vec::new();
+
+        for existing_dev_inst in existing_dev_insts {
+            match try_probe_existing_device(&self.database, existing_dev_inst) {
+                Ok(Some(probe)) => {
+                    probe_results.push(probe);
+                }
+                Ok(None) => {}
+                Err(err) => log::warn!("Initial probing device failed! {}", err),
+            };
+        }
+
+        Ok(probe_results)
     }
 
     pub fn get_notif(&self) -> Option<WinHotplugNotification> {

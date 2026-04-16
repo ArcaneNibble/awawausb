@@ -3229,6 +3229,25 @@ fn main() {
     // This is probably *still* incorrect, but dunno how to fix.
     let state = state.as_ref();
 
+    #[cfg(windows)]
+    {
+        match state.notifcation_handler.probe_existing() {
+            Ok(probe_results) => {
+                for probe_result in probe_results {
+                    match probe_result {
+                        WinHotplugNotification::NewInterface { .. } => {
+                            USBDevice::setup(probe_result, state)
+                        }
+                        WinHotplugNotification::RemoveInterface { .. } => {
+                            log::warn!("WTF? Got a device removal during initial probe");
+                        }
+                    }
+                }
+            }
+            Err(err) => log::warn!("Initial probing device failed! {}", err),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     // Now we have to do *this stupid bullshit* to find existing USB devices
     'find_existing_devs: {
