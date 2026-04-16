@@ -4,7 +4,7 @@ use std::error;
 use std::ffi::{OsString, c_void};
 use std::fmt::{Debug, Display};
 use std::io;
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::os::windows::ffi::OsStringExt;
 use std::ptr;
 use std::sync::{Mutex, mpsc};
@@ -887,12 +887,35 @@ fn probe_new_device(
             hub_hfile
         );
 
-        let dev_desc = hub_handle
-            .get_descriptor(usb_ch9::ch9_core::descriptor_types::DEVICE, 0, 0)?
-            .ok_or(WinEnumerationError::DescriptorParsingProblem(
-                "failed to get device descriptor",
-            ))?;
-        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor::from_bytes(&dev_desc)
+        // *sigh*, apparently this is how you get the current configuration
+        // (at least it gives you the device descriptor for free?)
+        let mut conn_info =
+            unsafe { MaybeUninit::<USB_NODE_CONNECTION_INFORMATION_EX>::zeroed().assume_init() };
+        conn_info.ConnectionIndex = hub_port;
+        let mut rbytes = 0;
+        let ret = unsafe {
+            DeviceIoControl(
+                hub_hfile,
+                IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX,
+                &mut conn_info as *mut _ as *mut c_void,
+                mem::size_of::<USB_NODE_CONNECTION_INFORMATION_EX>() as u32,
+                &mut conn_info as *mut _ as *mut c_void,
+                mem::size_of::<USB_NODE_CONNECTION_INFORMATION_EX>() as u32,
+                &mut rbytes,
+                ptr::null_mut(),
+            )
+        };
+        if ret == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let dev_desc = unsafe {
+            std::slice::from_raw_parts(
+                &conn_info.DeviceDescriptor as *const _ as *const u8,
+                mem::size_of::<USB_DEVICE_DESCRIPTOR>(),
+            )
+        };
+        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor::from_bytes(dev_desc)
             .ok_or(WinEnumerationError::DescriptorParsingProblem(
                 "failed to parse device descriptor",
             ))?
@@ -987,6 +1010,7 @@ fn probe_new_device(
 
         device_info = Some(WinHotplugDeviceInfo {
             dev_desc: *dev_desc,
+            current_config: conn_info.CurrentConfigurationValue,
             config_descs,
             bos_desc,
             string_descs: string_table_cache,
@@ -1178,6 +1202,7 @@ impl WinHotplugDatabase {
 #[derive(Debug)]
 pub struct WinHotplugDeviceInfo {
     pub dev_desc: usb_ch9::ch9_core::DeviceDescriptor,
+    pub current_config: u8,
     pub config_descs: Vec<Vec<u8>>,
     pub bos_desc: Option<Vec<u8>>,
     pub string_descs: HashMap<u8, Vec<u8>>,
