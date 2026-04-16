@@ -9,6 +9,8 @@ use std::os::windows::ffi::OsStringExt;
 use std::ptr;
 use std::sync::{Mutex, mpsc};
 
+use usb_ch9::USBDescriptor;
+
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::*;
 use windows_sys::Win32::Devices::Properties::*;
 use windows_sys::Win32::Devices::Usb::*;
@@ -79,6 +81,7 @@ pub enum WinEnumerationError {
     UnexpectedPropertyType(&'static str),
     CouldNotFindHub,
     CouldNotFindInterfaceNo,
+    DescriptorParsingProblem(&'static str),
 }
 impl error::Error for WinEnumerationError {
     fn cause(&self) -> Option<&dyn error::Error> {
@@ -99,6 +102,9 @@ impl Display for WinEnumerationError {
             }
             Self::CouldNotFindHub => write!(f, "Could not find the hub owning the device"),
             Self::CouldNotFindInterfaceNo => write!(f, "Could not figure out the interface number"),
+            Self::DescriptorParsingProblem(msg) => {
+                write!(f, "Could not deal with device's descriptors: {}", msg)
+            }
         }
     }
 }
@@ -483,103 +489,113 @@ fn get_dev_inst_id(instance_path: &[u16]) -> Result<NullU16, WinEnumerationError
     Ok(NullU16::from(buf))
 }
 
-fn get_descritor(
-    h_hub: HANDLE,
-    hub_port: u32,
-    desc_ty: u8,
-    desc_idx: u8,
-    w_index: u16,
-) -> Result<Option<Vec<u8>>, io::Error> {
-    let is_reading_cfg_desc = desc_ty == usb_ch9::ch9_core::descriptor_types::CONFIGURATION;
+struct HubHandle(HANDLE, u32);
+impl HubHandle {
+    fn get_descriptor(
+        &self,
+        desc_ty: u8,
+        desc_idx: u8,
+        w_index: u16,
+    ) -> Result<Option<Vec<u8>>, io::Error> {
+        let is_reading_cfg_desc = desc_ty == usb_ch9::ch9_core::descriptor_types::CONFIGURATION;
 
-    // Do an initial read to see how big the descriptor is
-    let mut rbytes = 0;
-    let mut initial_desc = USB_DESCRIPTOR_REQUEST_INITIAL {
-        ConnectionIndex: hub_port,
-        bmRequest: 0,
-        bRequest: 0,
-        wValue: ((desc_ty as u16) << 8) | (desc_idx as u16),
-        wIndex: w_index,
-        wLength: if is_reading_cfg_desc { 4 } else { 2 },
-        data: [0; 4],
-    };
+        // Do an initial read to see how big the descriptor is
+        let mut rbytes = 0;
+        let mut initial_desc = USB_DESCRIPTOR_REQUEST_INITIAL {
+            ConnectionIndex: self.1,
+            bmRequest: 0,
+            bRequest: 0,
+            wValue: ((desc_ty as u16) << 8) | (desc_idx as u16),
+            wIndex: w_index,
+            wLength: if is_reading_cfg_desc { 4 } else { 2 },
+            data: [0; 4],
+        };
 
-    let ret = unsafe {
-        DeviceIoControl(
-            h_hub,
-            IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
-            &mut initial_desc as *mut _ as *mut c_void,
-            mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
-            &mut initial_desc as *mut _ as *mut c_void,
-            mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
-            &mut rbytes,
-            ptr::null_mut(),
-        )
-    };
-    if ret == 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error().unwrap() as u32 == ERROR_GEN_FAILURE {
-            // This seems to be the error returned for invalid descriptor fetches
+        let ret = unsafe {
+            DeviceIoControl(
+                self.0,
+                IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
+                &mut initial_desc as *mut _ as *mut c_void,
+                mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
+                &mut initial_desc as *mut _ as *mut c_void,
+                mem::size_of::<USB_DESCRIPTOR_REQUEST_INITIAL>() as u32,
+                &mut rbytes,
+                ptr::null_mut(),
+            )
+        };
+        if ret == 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error().unwrap() as u32 == ERROR_GEN_FAILURE {
+                // This seems to be the error returned for invalid descriptor fetches
+                return Ok(None);
+            }
+            return Err(err);
+        }
+
+        // Check bDescriptorType against what we asked for
+        if initial_desc.data[1] != desc_ty {
             return Ok(None);
         }
-        return Err(err);
-    }
 
-    // Check bDescriptorType against what we asked for
-    if initial_desc.data[1] != desc_ty {
-        return Ok(None);
-    }
+        // Get the actual length to read
+        let actual_len = if is_reading_cfg_desc {
+            // wTotalLength
+            (initial_desc.data[2] as usize) | ((initial_desc.data[3] as usize) << 8)
+        } else {
+            // bLength
+            initial_desc.data[0] as usize
+        };
 
-    // Get the actual length to read
-    let actual_len = if is_reading_cfg_desc {
-        // wTotalLength
-        (initial_desc.data[2] as usize) | ((initial_desc.data[3] as usize) << 8)
-    } else {
-        // bLength
-        initial_desc.data[0] as usize
-    };
+        // Now allocate a buffer of the appropriate size
+        let ref_layout = Layout::new::<USB_DESCRIPTOR_REQUEST_INITIAL>();
+        let wanted_layout =
+            Layout::from_size_align(ref_layout.size() - 4 + actual_len, ref_layout.align())
+                .unwrap();
+        let buf = unsafe {
+            let buf = std::alloc::alloc_zeroed(wanted_layout);
 
-    // Now allocate a buffer of the appropriate size
-    let ref_layout = Layout::new::<USB_DESCRIPTOR_REQUEST_INITIAL>();
-    let wanted_layout =
-        Layout::from_size_align(ref_layout.size() - 4 + actual_len, ref_layout.align()).unwrap();
-    let buf = unsafe {
-        let buf = std::alloc::alloc_zeroed(wanted_layout);
+            #[repr(C)]
+            struct FatPointer {
+                ptr: *mut u8,
+                sz: usize,
+            }
 
-        #[repr(C)]
-        struct FatPointer {
-            ptr: *mut u8,
-            sz: usize,
+            mem::transmute::<_, &mut USB_DESCRIPTOR_REQUEST_WORKS>(FatPointer {
+                ptr: buf,
+                sz: actual_len,
+            })
+        };
+        buf.ConnectionIndex = self.1;
+        buf.wValue = ((desc_ty as u16) << 8) | (desc_idx as u16);
+        buf.wIndex = w_index;
+        buf.wLength = actual_len as u16;
+
+        // Issue the _real_ request now
+        let ret = unsafe {
+            DeviceIoControl(
+                self.0,
+                IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
+                buf as *mut _ as *mut c_void,
+                mem::size_of_val(buf) as u32,
+                buf as *mut _ as *mut c_void,
+                mem::size_of_val(buf) as u32,
+                &mut rbytes,
+                ptr::null_mut(),
+            )
+        };
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
         }
 
-        mem::transmute::<_, &mut USB_DESCRIPTOR_REQUEST_WORKS>(FatPointer {
-            ptr: buf,
-            sz: actual_len,
-        })
-    };
-    buf.ConnectionIndex = hub_port;
-    buf.wValue = ((desc_ty as u16) << 8) | (desc_idx as u16);
-    buf.wIndex = w_index;
-    buf.wLength = actual_len as u16;
-
-    // Issue the _real_ request now
-    let ret = unsafe {
-        DeviceIoControl(
-            h_hub,
-            IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION,
-            buf as *mut _ as *mut c_void,
-            mem::size_of_val(buf) as u32,
-            buf as *mut _ as *mut c_void,
-            mem::size_of_val(buf) as u32,
-            &mut rbytes,
-            ptr::null_mut(),
-        )
-    };
-    if ret == 0 {
-        return Err(io::Error::last_os_error());
+        Ok(Some(buf.data.to_owned()))
     }
-
-    Ok(Some(buf.data.to_owned()))
+}
+impl Drop for HubHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
 }
 
 fn probe_new_device(
@@ -858,48 +874,116 @@ fn probe_new_device(
                 ptr::null_mut(),
             )
         };
-        dbg!(hub_hfile);
-
-        let dev_desc = get_descritor(
-            hub_hfile,
-            hub_port,
-            usb_ch9::ch9_core::descriptor_types::DEVICE,
-            0,
-            0,
+        if hub_hfile == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error().into());
+        }
+        let hub_handle = HubHandle(hub_hfile, hub_port);
+        log::debug!(
+            "Caching useful descriptors for this device, handle = {:?}",
+            hub_hfile
         );
+
+        let dev_desc = hub_handle
+            .get_descriptor(usb_ch9::ch9_core::descriptor_types::DEVICE, 0, 0)?
+            .ok_or(WinEnumerationError::DescriptorParsingProblem(
+                "failed to get device descriptor",
+            ))?;
+        let dev_desc = usb_ch9::ch9_core::DeviceDescriptor::from_bytes(&dev_desc)
+            .ok_or(WinEnumerationError::DescriptorParsingProblem(
+                "failed to parse device descriptor",
+            ))?
+            .0;
         dbg!(dev_desc);
 
-        let asdf_desc = get_descritor(
-            hub_hfile,
-            hub_port,
-            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-            0,
-            0,
-        );
-        dbg!(asdf_desc);
-        let asdf_desc = get_descritor(
-            hub_hfile,
-            hub_port,
-            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-            1,
-            0,
-        );
-        dbg!(asdf_desc);
-        let asdf_desc = get_descritor(
-            hub_hfile,
-            hub_port,
-            usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
-            2,
-            0,
-        );
-        dbg!(asdf_desc);
-
-        let asdf_desc = get_descritor(hub_hfile, hub_port, 0xaa, 0, 0);
-        dbg!(asdf_desc);
-
-        unsafe {
-            CloseHandle(hub_hfile);
+        let mut config_descs = Vec::new();
+        for cfg_i in 0..dev_desc.bNumConfigurations {
+            let cfg_desc = hub_handle.get_descriptor(
+                usb_ch9::ch9_core::descriptor_types::CONFIGURATION,
+                cfg_i,
+                0,
+            )?;
+            if let Some(cfg_desc) = cfg_desc {
+                config_descs.push(cfg_desc);
+            } else {
+                log::warn!("failed to get configuration descriptor {:02x}", cfg_i)
+            }
         }
+
+        let mut string_table_cache = HashMap::new();
+        let mut string_cache_lang = 0;
+        let mut cache_string = |id: u8| -> Result<(), WinEnumerationError> {
+            if let hash_map::Entry::Vacant(v) = string_table_cache.entry(id) {
+                let string_desc = hub_handle.get_descriptor(
+                    usb_ch9::ch9_core::descriptor_types::STRING,
+                    id,
+                    string_cache_lang,
+                )?;
+                if let Some(string_desc) = string_desc {
+                    if id == 0 {
+                        if let Some((lang_desc, _)) =
+                            usb_ch9::ch9_core::StringDescriptor::from_bytes(&string_desc)
+                        {
+                            if lang_desc.bytes.len() >= 2 {
+                                string_cache_lang =
+                                    u16::from_le_bytes([lang_desc.bytes[0], lang_desc.bytes[1]]);
+                                log::debug!(
+                                    "USB descriptor language is 0x{:04x}",
+                                    string_cache_lang
+                                );
+                            }
+                        }
+                    }
+
+                    v.insert(string_desc);
+                } else {
+                    log::warn!("failed to get string descriptor {:02x}", id)
+                }
+            }
+
+            Ok(())
+        };
+        cache_string(0)?;
+        if dev_desc.iManufacturer != 0 {
+            cache_string(dev_desc.iManufacturer)?;
+        }
+        if dev_desc.iProduct != 0 {
+            cache_string(dev_desc.iProduct)?;
+        }
+        if dev_desc.iSerialNumber != 0 {
+            cache_string(dev_desc.iSerialNumber)?;
+        }
+        for cfg_desc in &config_descs {
+            for desc in usb_ch9::parse_descriptor_set(&cfg_desc) {
+                dbg!(&desc);
+                match desc {
+                    usb_ch9::DescriptorRef::Config(d) => {
+                        if d.iConfiguration != 0 {
+                            cache_string(d.iConfiguration)?;
+                        }
+                    }
+                    usb_ch9::DescriptorRef::Interface(d) => {
+                        if d.iInterface != 0 {
+                            cache_string(d.iInterface)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        dbg!(string_table_cache);
+
+        let bos_desc = if dev_desc.bcdUSB >= 0x0201 {
+            let bos_desc = hub_handle.get_descriptor(15, 0, 0)?;
+            if let Some(bos_desc) = bos_desc {
+                Some(bos_desc)
+            } else {
+                log::warn!("failed to get BOS descriptor");
+                None
+            }
+        } else {
+            None
+        };
+        dbg!(bos_desc);
     } else {
         log::debug!("We've seen this device before, associating interface with it...");
     }
