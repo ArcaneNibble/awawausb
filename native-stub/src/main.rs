@@ -2098,6 +2098,28 @@ impl USBDevice {
         }
     }
 
+    // Try and open _any_ path we have, until it succeeds
+    fn _open_some_interface(&mut self) -> Option<(u8, WinUSBHandle)> {
+        let mut opened = None;
+        let mut ifaces_to_try = self._win_iface_paths.keys().collect::<Vec<_>>();
+        ifaces_to_try.sort();
+        for if_no in ifaces_to_try {
+            let if_path = self._win_iface_paths.get(if_no).unwrap();
+            log::debug!("Trying {:?}", if_path);
+            match WinUSBHandle::open(if_path) {
+                Ok(handle) => {
+                    opened = Some((*if_no, handle));
+                    break;
+                }
+                Err(err) => {
+                    log::debug!("Failed to open {:?}: {}", if_path, err);
+                }
+            }
+        }
+
+        opened
+    }
+
     fn open_device(&mut self, sid: u64, txn_id: &str) -> DeviceResult {
         if self.opened {
             log::debug!(
@@ -2114,25 +2136,7 @@ impl USBDevice {
                 log::warn!("For some reason, we appear to already have a handle open?!");
             }
 
-            // Try and open _any_ path we have, until it succeeds
-            let mut opened = None;
-            let mut ifaces_to_try = self._win_iface_paths.keys().collect::<Vec<_>>();
-            ifaces_to_try.sort();
-            for if_no in ifaces_to_try {
-                let if_path = self._win_iface_paths.get(if_no).unwrap();
-                log::debug!("Trying {:?}", if_path);
-                match WinUSBHandle::open(if_path) {
-                    Ok(handle) => {
-                        opened = Some((*if_no, handle));
-                        break;
-                    }
-                    Err(err) => {
-                        log::debug!("Failed to open {:?}: {}", if_path, err);
-                    }
-                }
-            }
-
-            if let Some((if_no, handle)) = opened {
+            if let Some((if_no, handle)) = self._open_some_interface() {
                 // Open successful
                 log::debug!("Opened interface {:02x}", if_no);
                 self._win_iface_handles.insert(if_no, handle);
