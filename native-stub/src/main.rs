@@ -648,7 +648,12 @@ impl USBDevice {
             txn_id
         );
 
-        let claimed_ifs = self.current_if_state.keys().map(|x| *x).collect::<Vec<_>>();
+        let claimed_ifs = self
+            .current_if_state
+            .iter()
+            .filter(|(_if_no, if_state)| if_state.claimed)
+            .map(|x| *x.0)
+            .collect::<Vec<_>>();
         for iface in claimed_ifs {
             self.release_interface(sid, txn_id, iface)?;
         }
@@ -2200,12 +2205,15 @@ impl USBDevice {
         log::debug!("device close, sid = {}, txn = {}", sid, txn_id);
 
         // Release all interfaces
-        let claimed_ifs = self.current_if_state.keys().map(|x| *x).collect::<Vec<_>>();
+        let claimed_ifs = self
+            .current_if_state
+            .iter()
+            .filter(|(_if_no, if_state)| if_state.claimed)
+            .map(|x| *x.0)
+            .collect::<Vec<_>>();
         for iface in claimed_ifs {
-            dbg!(iface);
             self.release_interface(sid, txn_id, iface)?;
         }
-        dbg!(&self._win_iface_handles);
 
         // Release all interfaces including the secret one
         for (if_no, (refcount, _handle)) in self._win_iface_handles.drain() {
