@@ -300,4 +300,56 @@ impl WinUSBHandle {
 
         Ok(())
     }
+
+    pub fn data_xfer(
+        &mut self,
+        txn_id: &str,
+        mut buf: Vec<u8>,
+        ep: u8,
+        length: u32,
+        dir: crate::USBTransferDirection,
+    ) -> io::Result<()> {
+        assert!(length as usize <= buf.capacity());
+
+        let buf_ptr = buf.as_mut_ptr();
+        let urbwrapper = Box::new(WindowsURBWrapper {
+            txn_id: txn_id.to_owned(),
+            dir,
+            buf,
+            overlapped: zero_overlapped(),
+        });
+        let lpoverlapped = &urbwrapper.overlapped as *const OVERLAPPED;
+        let _urbwrapper = Box::into_raw(urbwrapper);
+
+        match dir {
+            crate::USBTransferDirection::HostToDevice => unsafe {
+                WinUsb_WritePipe(
+                    self.winusb_handle,
+                    ep,
+                    buf_ptr as *const u8,
+                    length,
+                    ptr::null_mut(),
+                    lpoverlapped,
+                )
+            },
+            crate::USBTransferDirection::DeviceToHost => unsafe {
+                WinUsb_ReadPipe(
+                    self.winusb_handle,
+                    ep,
+                    buf_ptr,
+                    length,
+                    ptr::null_mut(),
+                    lpoverlapped,
+                )
+            },
+        };
+
+        // This never "succeeds"
+        let err = io::Error::last_os_error();
+        if err.raw_os_error().unwrap() as u32 != ERROR_IO_PENDING {
+            return Err(err);
+        }
+
+        Ok(())
+    }
 }
