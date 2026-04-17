@@ -30,9 +30,17 @@ pub fn iocp_thread(iocp: usize) {
                 INFINITE,
             )
         };
+        let mut status = 0;
         if ret == 0 {
-            log::error!("IOCP polling failed! {}", io::Error::last_os_error());
-            break;
+            if lpoverlapped.is_null() {
+                // > the function did not dequeue a completion packet from the completion port
+                log::error!("IOCP polling failed! {}", io::Error::last_os_error());
+                break;
+            } else {
+                // > the function dequeues a completion packet
+                // > for a **failed** I/O operation from the completion port
+                status = io::Error::last_os_error().raw_os_error().unwrap() as u32;
+            }
         }
 
         if completion_key == 1 {
@@ -52,8 +60,6 @@ pub fn iocp_thread(iocp: usize) {
             urbwrapper.buf.set_len(nbytes as usize);
         }
 
-        let status = urbwrapper.overlapped.Internal;
-
         log::debug!(
             "request {} finished, status {}, buf {:02x?}",
             urbwrapper.txn_id,
@@ -61,7 +67,19 @@ pub fn iocp_thread(iocp: usize) {
             urbwrapper.buf,
         );
 
-        if status == 0 {
+        // Send notification
+        if status == ERROR_GEN_FAILURE {
+            // This is a stall, apparently
+            let notif = crate::protocol::ResponseMessage::RequestError {
+                txn_id: urbwrapper.txn_id.clone(),
+                error: crate::protocol::Errors::Stall,
+                bytes_written: nbytes as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_windows::write_stdout_msg(notif.as_bytes())
+                .expect("failed to write stdout");
+        } else if status == 0 {
+            // FIXME: Does Windows just not detect a babble condition?
             let babble = false;
             let data: Option<_> = if urbwrapper.dir == crate::USBTransferDirection::DeviceToHost {
                 Some(URL_SAFE_NO_PAD.encode(&urbwrapper.buf))
@@ -77,28 +95,16 @@ pub fn iocp_thread(iocp: usize) {
             let notif = serde_json::to_string(&notif).unwrap();
             crate::stdio_windows::write_stdout_msg(notif.as_bytes())
                 .expect("failed to write stdout");
+        } else {
+            let notif = crate::protocol::ResponseMessage::RequestError {
+                txn_id: urbwrapper.txn_id.clone(),
+                error: crate::protocol::Errors::TransferError,
+                bytes_written: nbytes as u64,
+            };
+            let notif = serde_json::to_string(&notif).unwrap();
+            crate::stdio_windows::write_stdout_msg(notif.as_bytes())
+                .expect("failed to write stdout");
         }
-
-        // // Send notification
-        // if self.urb.status == -libc::EPIPE {
-        //     let notif = crate::protocol::ResponseMessage::RequestError {
-        //         txn_id: self.txn_id.clone(),
-        //         error: crate::protocol::Errors::Stall,
-        //         bytes_written: self.urb.actual_length as u64,
-        //     };
-        //     let notif = serde_json::to_string(&notif).unwrap();
-        //     crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        // } else if self.urb.status == 0 || self.urb.status == -libc::EOVERFLOW {
-        //     let babble = self.urb.status == -libc::EOVERFLOW;
-        // } else {
-        //     let notif = crate::protocol::ResponseMessage::RequestError {
-        //         txn_id: self.txn_id.clone(),
-        //         error: crate::protocol::Errors::TransferError,
-        //         bytes_written: self.urb.actual_length as u64,
-        //     };
-        //     let notif = serde_json::to_string(&notif).unwrap();
-        //     crate::stdio_unix::write_stdout_msg(notif.as_bytes()).expect("failed to write stdout");
-        // }
     }
 }
 
