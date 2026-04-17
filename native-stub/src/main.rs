@@ -196,10 +196,10 @@ pub struct USBDevice {
     ///
     /// Different interfaces cannot use the same endpoints
     pub ep_to_idx: HashMap<(u8, u8), u8>,
-    /// Map from bInterfaceNumber to bInterfaceNumber
+    /// Map from bInterfaceNumber to (bInterfaceNumber, 0-based-index)
     ///
     /// This is only actually used on Windows
-    pub iad_map: HashMap<u8, u8>,
+    pub iad_map: HashMap<u8, (u8, u8)>,
 
     pub opened: bool,
     pub current_configuration_id: u8,
@@ -272,6 +272,10 @@ impl USBDevice {
     pub(crate) fn reformat_config_descriptors(&mut self, create_iface_dummy_info: bool) {
         // FIXME: This is only stored for the active config
         let mut iad_map = HashMap::new();
+        let use_iad = self.device_descriptor.bDeviceClass == 0xef
+            && self.device_descriptor.bDeviceSubClass == 0x02
+            && self.device_descriptor.bDeviceProtocol == 0x01;
+
         let mut ep_to_idx = HashMap::new();
         let mut configs = Vec::new();
         for cfg_desc in &self.config_descriptors {
@@ -395,23 +399,26 @@ impl USBDevice {
                         }
                     }
                     usb_ch9::DescriptorRef::IAD(d) => {
-                        if let Some(this_config_desc) = &mut this_config_desc {
-                            if this_config_desc.bConfigurationValue == self.current_configuration_id
-                            {
-                                for if_no in
-                                    d.bFirstInterface..d.bFirstInterface + d.bInterfaceCount
+                        if use_iad {
+                            if let Some(this_config_desc) = &mut this_config_desc {
+                                if this_config_desc.bConfigurationValue
+                                    == self.current_configuration_id
                                 {
-                                    let orig = iad_map.insert(if_no, d.bFirstInterface);
-                                    if orig.is_some() && orig != Some(d.bFirstInterface) {
-                                        log::warn!("Overlapping IAD? {:?}", d)
+                                    for if_idx in 0..d.bInterfaceCount {
+                                        let if_no = d.bFirstInterface + if_idx;
+                                        let mapped = (d.bFirstInterface, if_idx);
+                                        let orig = iad_map.insert(if_no, mapped);
+                                        if orig.is_some() && orig != Some(mapped) {
+                                            log::warn!("Overlapping IAD? {:?}", d)
+                                        }
                                     }
                                 }
+                            } else {
+                                log::warn!(
+                                    "Bogus interface association descriptor without config descriptor? {:?}",
+                                    desc
+                                )
                             }
-                        } else {
-                            log::warn!(
-                                "Bogus interface association descriptor without config descriptor? {:?}",
-                                desc
-                            )
                         }
                     }
                     _ => {}
@@ -2111,10 +2118,14 @@ impl USBDevice {
             // If we have the whole device, rewrite the IAD map so that *everything* maps to 0
             if whole_device {
                 let mut iad_map = HashMap::new();
+                let mut iad_index = 0;
                 for cfg_desc in &dev.reformatted_config_descriptors {
                     if cfg_desc.bConfigurationValue == dev.current_configuration_id {
                         for if_desc in &cfg_desc.interfaces {
-                            iad_map.insert(if_desc.bInterfaceNumber, 0);
+                            if if_desc.bAlternateSetting == 0 {
+                                iad_map.insert(if_desc.bInterfaceNumber, (0, iad_index));
+                                iad_index += 1;
+                            }
                         }
                     }
                 }
@@ -2215,19 +2226,12 @@ impl USBDevice {
             self.release_interface(sid, txn_id, iface)?;
         }
 
-        // Release all interfaces including the secret one
+        // Release all interfaces (including the secret one for device-global ops)
         for (if_no, (refcount, _handle)) in self._win_iface_handles.drain() {
-            if refcount != 1 {
-                log::warn!(
-                    "Somehow there's an extra ref on interface {:02x}, sid = {}, txn = {}",
-                    if_no,
-                    sid,
-                    txn_id
-                );
-            }
             log::debug!(
-                "closing interface {:02x}, sid = {}, txn = {}",
+                "closing interface {:02x} ({} refs), sid = {}, txn = {}",
                 if_no,
+                refcount,
                 sid,
                 txn_id
             );
@@ -2291,21 +2295,28 @@ impl USBDevice {
                 txn_id
             );
 
-            if let Some(mapped_if) = self.iad_map.get(&value) {
-                if value != *mapped_if {
-                    log::debug!(
-                        "Mapping interface {:02x} -> {:02x}, sid = {}, txn = {}",
-                        value,
-                        mapped_if,
-                        sid,
-                        txn_id
-                    );
-                }
-                value = *mapped_if;
-            }
-            match self._win_iface_handles.entry(value) {
+            // Handle the mapping of multiple interfaces in one driver
+            let (root_if_no, if_alt_idx) =
+                if let Some((root_if_no, if_alt_idx)) = self.iad_map.get(&value) {
+                    if *root_if_no != value {
+                        log::debug!(
+                            "Mapping interface {:02x} -> {:02x} idx {}, sid = {}, txn = {}",
+                            value,
+                            root_if_no,
+                            if_alt_idx,
+                            sid,
+                            txn_id
+                        );
+                    }
+                    (*root_if_no, *if_alt_idx)
+                } else {
+                    (value, 0)
+                };
+
+            // Make sure we open the "root" interface for this set
+            let root_handle = match self._win_iface_handles.entry(root_if_no) {
                 hash_map::Entry::Occupied(mut entry) => {
-                    // The interface is already opened, so now we claim it "for real"
+                    // The interface is already opened, so we increase the refcount
                     // (this can happen with IADs)
                     log::debug!(
                         "Interface in fact open already, sid = {}, txn = {}",
@@ -2313,8 +2324,7 @@ impl USBDevice {
                         txn_id
                     );
                     entry.get_mut().0 += 1;
-                    iface_state.claimed = true;
-                    Ok(DeviceOpResult::SendCompletionNow)
+                    entry.into_mut()
                 }
                 hash_map::Entry::Vacant(entry) => {
                     if let Some(path) = self._win_iface_paths.get(&value) {
@@ -2339,25 +2349,40 @@ impl USBDevice {
                                     log::warn!("Failed to associate IOCP! {}", err);
                                     return Err(protocol::Errors::TransferError);
                                 }
-                                // Successfully claimed!
-                                entry.insert((1, handle));
-                                iface_state.claimed = true;
-                                Ok(DeviceOpResult::SendCompletionNow)
+                                entry.insert((1, handle))
                             }
                             Err(err) => {
                                 log::debug!("Failed to open {:?}: {}", path, err);
                                 if err.kind() == io::ErrorKind::PermissionDenied {
-                                    Err(protocol::Errors::AlreadyClaimed)
+                                    return Err(protocol::Errors::AlreadyClaimed);
                                 } else {
-                                    Err(protocol::Errors::TransferError)
+                                    return Err(protocol::Errors::TransferError);
                                 }
                             }
                         }
                     } else {
-                        Err(protocol::Errors::InvalidNumber)
+                        return Err(protocol::Errors::InvalidNumber);
+                    }
+                }
+            };
+
+            // If we in fact were not opening the "root" interface, open the one we actually want
+            if if_alt_idx != 0 {
+                // For *some reason*, additional interfaces are mapped such that 0 is the first *extra* interface
+                match root_handle.1.open_alt(if_alt_idx - 1) {
+                    Ok(this_handle) => {
+                        self._win_iface_handles.insert(value, (1, this_handle));
+                    }
+                    Err(err) => {
+                        log::debug!("Failed to open alt {}: {}", if_alt_idx, err);
+                        return Err(protocol::Errors::TransferError);
                     }
                 }
             }
+
+            // Successfully claimed!
+            iface_state.claimed = true;
+            Ok(DeviceOpResult::SendCompletionNow)
         }
     }
 
@@ -2378,10 +2403,6 @@ impl USBDevice {
             sid,
             txn_id
         );
-
-        if let Some(mapped_if) = self.iad_map.get(&value) {
-            value = *mapped_if;
-        }
 
         let iface_obj = self._win_iface_handles.entry(value);
         match iface_obj {
