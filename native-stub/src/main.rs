@@ -2542,7 +2542,11 @@ impl USBDevice {
                 return Err(protocol::Errors::InvalidState);
             }
 
-            todo!()
+            let iface_obj = self
+                ._win_iface_handles
+                .get_mut(&iface)
+                .expect("interface is claimed, but we don't have the handle!");
+            interface_handle = &mut iface_obj.1;
         } else if request_type & 0b11111 == 2 {
             // If it's an endpoint transfer, check if the endpoint exists and if the interface is claimed
             self._check_open()?;
@@ -2562,7 +2566,11 @@ impl USBDevice {
                 return Err(protocol::Errors::InvalidState);
             }
 
-            todo!()
+            let iface_obj = self
+                ._win_iface_handles
+                .get_mut(&iface)
+                .expect("interface is claimed, but we don't have the handle!");
+            interface_handle = &mut iface_obj.1;
         } else {
             // A device or a other/reserved request, so we need _something_ open
             // (unless it's an internal-use-only request, as another huge hack)
