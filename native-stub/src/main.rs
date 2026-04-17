@@ -2270,7 +2270,7 @@ impl USBDevice {
         &mut self,
         sid: u64,
         txn_id: &str,
-        mut value: u8,
+        value: u8,
         engine: Pin<&USBStubEngine>,
     ) -> DeviceResult {
         self._check_open()?;
@@ -2369,7 +2369,7 @@ impl USBDevice {
             // If we in fact were not opening the "root" interface, open the one we actually want
             if if_alt_idx != 0 {
                 // For *some reason*, additional interfaces are mapped such that 0 is the first *extra* interface
-                match root_handle.1.open_alt(if_alt_idx - 1) {
+                match root_handle.1.open_other(if_alt_idx - 1) {
                     Ok(this_handle) => {
                         self._win_iface_handles.insert(value, (1, this_handle));
                     }
@@ -2428,7 +2428,42 @@ impl USBDevice {
     }
 
     fn set_alt_interface(&mut self, sid: u64, txn_id: &str, iface: u8, alt: u8) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        log::debug!(
+            "device set alt interface 0x{:02x} 0x{:02x}, sid = {}, txn = {}",
+            iface,
+            alt,
+            sid,
+            txn_id
+        );
+
+        let iface_obj = self
+            ._win_iface_handles
+            .get_mut(&iface)
+            .expect("interface is claimed, but we don't have the handle!");
+        if let Err(err) = iface_obj.1.set_alt_if(alt) {
+            log::warn!(
+                "WinUsb_SetCurrentAlternateSetting failed, alt = {:02x}, sid = {}, txn = {}, ret = {} ",
+                alt,
+                sid,
+                txn_id,
+                err
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            // Set alt interface successful
+            iface_state.alt_setting = alt;
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn ctrl_xfer(

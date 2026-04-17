@@ -186,10 +186,10 @@ impl WinUSBHandle {
         Ok(ret)
     }
 
-    pub fn open_alt(&mut self, alt_idx: u8) -> io::Result<Self> {
+    pub fn open_other(&mut self, other_idx: u8) -> io::Result<Self> {
         let mut hwinusb = ptr::null_mut();
         let ret =
-            unsafe { WinUsb_GetAssociatedInterface(self.winusb_handle, alt_idx, &mut hwinusb) };
+            unsafe { WinUsb_GetAssociatedInterface(self.winusb_handle, other_idx, &mut hwinusb) };
         if ret == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -198,6 +198,14 @@ impl WinUSBHandle {
             raw_handle: INVALID_HANDLE_VALUE,
             winusb_handle: hwinusb,
         })
+    }
+
+    pub fn set_alt_if(&mut self, alt: u8) -> io::Result<()> {
+        let ret = unsafe { WinUsb_SetCurrentAlternateSetting(self.winusb_handle, alt) };
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub fn _set_timeout(&mut self, timeout: u32) {
