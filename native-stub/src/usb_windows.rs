@@ -214,6 +214,14 @@ impl WinUSBHandle {
         Ok(())
     }
 
+    pub fn clear_halt(&mut self, ep: u8) -> io::Result<()> {
+        let ret = unsafe { WinUsb_ResetPipe(self.winusb_handle, ep) };
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn _set_timeout(&mut self, timeout: u32) {
         let timeout = timeout as u32;
         let ret = unsafe {

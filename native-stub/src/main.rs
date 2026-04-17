@@ -2386,7 +2386,7 @@ impl USBDevice {
         }
     }
 
-    fn release_interface(&mut self, sid: u64, txn_id: &str, mut value: u8) -> DeviceResult {
+    fn release_interface(&mut self, sid: u64, txn_id: &str, value: u8) -> DeviceResult {
         self._check_open()?;
 
         let iface_state = self
@@ -2452,7 +2452,7 @@ impl USBDevice {
             .expect("interface is claimed, but we don't have the handle!");
         if let Err(err) = iface_obj.1.set_alt_if(alt) {
             log::warn!(
-                "WinUsb_SetCurrentAlternateSetting failed, alt = {:02x}, sid = {}, txn = {}, ret = {} ",
+                "WinUsb_SetCurrentAlternateSetting failed, alt = {:02x}, sid = {}, txn = {}, err = {} ",
                 alt,
                 sid,
                 txn_id,
@@ -2653,7 +2653,39 @@ impl USBDevice {
     }
 
     fn clear_halt(&mut self, sid: u64, txn_id: &str, ep: u8) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+
+        let iface = self
+            .ep_to_idx
+            .get(&(self.current_configuration_id, ep))
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        let iface_obj = self
+            ._win_iface_handles
+            .get_mut(&iface)
+            .expect("interface is claimed, but we don't have the handle!");
+
+        log::debug!("clear halt, sid = {}, txn = {}, {:02x}", sid, txn_id, ep,);
+
+        if let Err(err) = iface_obj.1.clear_halt(ep) {
+            log::warn!(
+                "WinUsb_ResetPipe failed ep 0x{:02x}, sid = {}, txn = {}, err = {} ",
+                ep,
+                sid,
+                txn_id,
+                err
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::SendCompletionNow)
+        }
     }
 
     fn isoc_xfer(
