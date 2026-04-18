@@ -6,5 +6,17 @@
     "permission_hdr": {
         "message": "A web page would like to access a USB device.",
         "description": "First line (before device list) of the permission page"
+    },
+    "permission_click_ok": {
+        "message": "Click “OK” to allow this.",
+        "description": "Permission page message, for \"click ok\""
+    },
+    "permission_p1": {
+        "message": "This lets the website talk with hardware plugged in to your computer. This goes beyond what websites are normally allowed to do. This can be very useful, but the browser cannot check everything the website or the USB device might do to your computer.",
+        "description": "Permission page explanation, paragraph 1"
+    },
+    "permission_p2": {
+        "message": "You should only allow this if you expect the website to be trying to access something “<abbr title=\"in real life\">IRL</abbr>.”",
+        "description": "Permission page explanation, paragraph 2"
     }
 }

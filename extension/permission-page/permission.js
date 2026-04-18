@@ -102,6 +102,6 @@ submitbtn.addEventListener('click', () => {
 let all_elems = document.getElementsByTagName("*");
 for (let elem of all_elems) {
     if (elem.dataset.i18n !== undefined) {
-        elem.innerText = browser.i18n.getMessage(elem.dataset.i18n);
+        elem.innerHTML = browser.i18n.getMessage(elem.dataset.i18n);
     }
 }
