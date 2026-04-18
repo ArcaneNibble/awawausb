@@ -15,8 +15,6 @@ use windows_sys::Win32::System::Threading::INFINITE;
 pub fn iocp_thread(iocp: usize) {
     let iocp = iocp as HANDLE;
     loop {
-        log::debug!("iocp thread");
-
         let mut nbytes = 0;
         let mut completion_key = 0;
         let mut lpoverlapped = ptr::null_mut();

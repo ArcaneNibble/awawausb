@@ -1,4 +1,6 @@
-use std::cell::{Cell, RefCell};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{HashMap, hash_map};
 use std::convert::Infallible;
 #[cfg(windows)]
@@ -7,6 +9,7 @@ use std::ffi::OsString;
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Debug;
 use std::io;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::mem;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
@@ -3812,8 +3815,6 @@ impl USBStubEngine {
     #[cfg(windows)]
     /// Run one loop. Returns true if we should continue
     pub fn run_loop(self: Pin<&Self>) -> bool {
-        log::debug!("win32 loop");
-
         // Poll for events
         let waits = [self.stdin_reader.event, self.notifcation_handler.h_event];
 
