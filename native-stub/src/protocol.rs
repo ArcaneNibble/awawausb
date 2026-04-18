@@ -29,7 +29,7 @@ pub enum Errors {
     AlreadyClaimed,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum IsocPacketState {
     Ok,
     Babble,

@@ -79,22 +79,95 @@ pub fn iocp_thread(iocp: usize) {
             crate::stdio_windows::write_stdout_msg(notif.as_bytes())
                 .expect("failed to write stdout");
         } else if status == 0 {
-            // FIXME: Does Windows just not detect a babble condition?
-            let babble = false;
-            let data: Option<_> = if urbwrapper.dir == crate::USBTransferDirection::DeviceToHost {
-                Some(URL_SAFE_NO_PAD.encode(&urbwrapper.buf))
+            if urbwrapper.isoc_buf_handle.is_none() {
+                // FIXME: Does Windows just not detect a babble condition?
+                let babble = false;
+                let data: Option<_> = if urbwrapper.dir == crate::USBTransferDirection::DeviceToHost
+                {
+                    Some(URL_SAFE_NO_PAD.encode(&urbwrapper.buf))
+                } else {
+                    None
+                };
+                let notif = crate::protocol::ResponseMessage::RequestComplete {
+                    txn_id: urbwrapper.txn_id.clone(),
+                    babble,
+                    data,
+                    bytes_written: nbytes as u64,
+                };
+                let notif = serde_json::to_string(&notif).unwrap();
+                crate::stdio_windows::write_stdout_msg(notif.as_bytes())
+                    .expect("failed to write stdout");
             } else {
-                None
-            };
-            let notif = crate::protocol::ResponseMessage::RequestComplete {
-                txn_id: urbwrapper.txn_id.clone(),
-                babble,
-                data,
-                bytes_written: nbytes as u64,
-            };
-            let notif = serde_json::to_string(&notif).unwrap();
-            crate::stdio_windows::write_stdout_msg(notif.as_bytes())
-                .expect("failed to write stdout");
+                // Handle isoc completions
+                dbg!(&urbwrapper);
+                let mut had_unwanted_error = false;
+                let mut pkt_status;
+                let mut pkt_lens;
+                let data;
+                match urbwrapper.dir {
+                    crate::USBTransferDirection::HostToDevice => {
+                        // We lie and tell the requester that we used the packet lengths they asked for
+                        // (since we get no other information anyways)
+                        pkt_status = vec![
+                            crate::protocol::IsocPacketState::Ok;
+                            urbwrapper.isoc_dummy_pkt_len.len()
+                        ];
+                        pkt_lens = urbwrapper.isoc_dummy_pkt_len;
+                        data = None;
+                    }
+                    crate::USBTransferDirection::DeviceToHost => {
+                        let num_pkts = urbwrapper.isoc_rx_packets.len();
+                        pkt_status = Vec::with_capacity(num_pkts);
+                        pkt_lens = Vec::with_capacity(num_pkts);
+                        let mut data_buf = Vec::with_capacity(nbytes as usize);
+                        for i in 0..num_pkts {
+                            let pkt_i = &urbwrapper.isoc_rx_packets[i];
+
+                            pkt_status.push(if pkt_i.Status != 0 {
+                                crate::protocol::IsocPacketState::Ok
+                            } else {
+                                had_unwanted_error = true;
+                                crate::protocol::IsocPacketState::Error
+                            });
+
+                            pkt_lens.push(pkt_i.Length);
+
+                            // Windows apparently doesn't require isoc rx packets to be contiguous?
+                            let this_pkt_slice = unsafe {
+                                std::slice::from_raw_parts(
+                                    urbwrapper.buf.as_ptr().add(pkt_i.Offset as usize),
+                                    pkt_i.Length as usize,
+                                )
+                            };
+                            data_buf.extend_from_slice(this_pkt_slice);
+                        }
+
+                        data = Some(URL_SAFE_NO_PAD.encode(&data_buf));
+                    }
+                }
+
+                if had_unwanted_error {
+                    let notif = crate::protocol::ResponseMessage::RequestError {
+                        txn_id: urbwrapper.txn_id.clone(),
+                        error: crate::protocol::Errors::TransferError,
+                        bytes_written: nbytes as u64,
+                    };
+                    let notif = serde_json::to_string(&notif).unwrap();
+                    crate::stdio_windows::write_stdout_msg(notif.as_bytes())
+                        .expect("failed to write stdout");
+                } else {
+                    // Success
+                    let notif = crate::protocol::ResponseMessage::IsocRequestComplete {
+                        txn_id: urbwrapper.txn_id,
+                        data,
+                        pkt_status,
+                        pkt_len: pkt_lens,
+                    };
+                    let notif = serde_json::to_string(&notif).unwrap();
+                    crate::stdio_windows::write_stdout_msg(notif.as_bytes())
+                        .expect("failed to write stdout");
+                }
+            }
         } else {
             let notif = crate::protocol::ResponseMessage::RequestError {
                 txn_id: urbwrapper.txn_id.clone(),
@@ -119,11 +192,24 @@ pub fn zero_overlapped() -> OVERLAPPED {
     }
 }
 
+#[repr(transparent)]
+pub struct IsocBufHandle(pub ptr::NonNull<c_void>);
+impl Drop for IsocBufHandle {
+    fn drop(&mut self) {
+        unsafe {
+            WinUsb_UnregisterIsochBuffer(self.0.as_ptr());
+        }
+    }
+}
+
 pub struct WindowsURBWrapper {
     pub txn_id: String,
     pub dir: crate::USBTransferDirection,
     pub buf: Vec<u8>,
     pub overlapped: OVERLAPPED,
+    pub isoc_buf_handle: Option<IsocBufHandle>,
+    pub isoc_dummy_pkt_len: Vec<u32>,
+    pub isoc_rx_packets: Vec<USBD_ISO_PACKET_DESCRIPTOR>,
 }
 impl Debug for WindowsURBWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -268,6 +354,9 @@ impl WinUSBHandle {
             dir,
             buf,
             overlapped: zero_overlapped(),
+            isoc_buf_handle: None,
+            isoc_dummy_pkt_len: Vec::new(),
+            isoc_rx_packets: Vec::new(),
         });
         let lpoverlapped = &urbwrapper.overlapped as *const OVERLAPPED;
         let _urbwrapper = Box::into_raw(urbwrapper);
@@ -317,6 +406,9 @@ impl WinUSBHandle {
             dir,
             buf,
             overlapped: zero_overlapped(),
+            isoc_buf_handle: None,
+            isoc_dummy_pkt_len: Vec::new(),
+            isoc_rx_packets: Vec::new(),
         });
         let lpoverlapped = &urbwrapper.overlapped as *const OVERLAPPED;
         let _urbwrapper = Box::into_raw(urbwrapper);
@@ -339,6 +431,93 @@ impl WinUSBHandle {
                     buf_ptr,
                     length,
                     ptr::null_mut(),
+                    lpoverlapped,
+                )
+            },
+        };
+
+        // This never "succeeds"
+        let err = io::Error::last_os_error();
+        if err.raw_os_error().unwrap() as u32 != ERROR_IO_PENDING {
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    pub fn isoc_xfer(
+        &mut self,
+        txn_id: &str,
+        mut buf: Vec<u8>,
+        ep: u8,
+        pkt_len: Vec<u32>,
+        total_len: usize,
+        dir: crate::USBTransferDirection,
+    ) -> io::Result<()> {
+        assert!(total_len <= buf.capacity());
+
+        let buf_ptr = buf.as_mut_ptr();
+        let num_packets = pkt_len.len();
+
+        // Isoc buffers need to be "registered"
+        let mut isoc_buf_handle_raw = ptr::null_mut();
+        let ret = unsafe {
+            WinUsb_RegisterIsochBuffer(
+                self.winusb_handle,
+                ep,
+                buf_ptr,
+                total_len as u32,
+                &mut isoc_buf_handle_raw,
+            )
+        };
+        if ret == 0 {
+            log::warn!("WinUsb_RegisterIsochBuffer failed, txn = {}", txn_id);
+            return Err(io::Error::last_os_error());
+        }
+        let isoc_buf_handle = Some(IsocBufHandle(
+            ptr::NonNull::new(isoc_buf_handle_raw).unwrap(),
+        ));
+
+        // If we're reading, we need to allocate room for the OS's response buffers
+        let mut isoc_rx_packets = if dir == crate::USBTransferDirection::DeviceToHost {
+            vec![
+                USBD_ISO_PACKET_DESCRIPTOR {
+                    Offset: 0,
+                    Length: 0,
+                    Status: 0
+                };
+                num_packets
+            ]
+        } else {
+            Vec::new()
+        };
+        let p_isoc_rx_packets = isoc_rx_packets.as_mut_ptr();
+
+        // Finally set up the transfer
+        let urbwrapper = Box::new(WindowsURBWrapper {
+            txn_id: txn_id.to_owned(),
+            dir,
+            buf,
+            overlapped: zero_overlapped(),
+            isoc_buf_handle,
+            isoc_dummy_pkt_len: pkt_len,
+            isoc_rx_packets,
+        });
+        let lpoverlapped = &urbwrapper.overlapped as *const OVERLAPPED;
+        let _urbwrapper = Box::into_raw(urbwrapper);
+
+        match dir {
+            crate::USBTransferDirection::HostToDevice => unsafe {
+                WinUsb_WriteIsochPipeAsap(isoc_buf_handle_raw, 0, total_len as u32, 0, lpoverlapped)
+            },
+            crate::USBTransferDirection::DeviceToHost => unsafe {
+                WinUsb_ReadIsochPipeAsap(
+                    isoc_buf_handle_raw,
+                    0,
+                    total_len as u32,
+                    0,
+                    num_packets as u32,
+                    p_isoc_rx_packets,
                     lpoverlapped,
                 )
             },

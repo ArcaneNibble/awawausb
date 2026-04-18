@@ -2737,7 +2737,50 @@ impl USBDevice {
         pkt_len: Vec<u32>,
         buf: Vec<u8>,
     ) -> DeviceResult {
-        todo!()
+        self._check_open()?;
+
+        let iface = self
+            .ep_to_idx
+            .get(&(self.current_configuration_id, ep))
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        let iface_state = self
+            .current_if_state
+            .get_mut(&iface)
+            .ok_or(protocol::Errors::InvalidNumber)?;
+        if !iface_state.claimed {
+            return Err(protocol::Errors::InvalidState);
+        }
+
+        let iface_obj = self
+            ._win_iface_handles
+            .get_mut(&iface)
+            .expect("interface is claimed, but we don't have the handle!");
+
+        log::debug!(
+            "isoc transfer, sid = {}, txn = {}, {:02x} {:08x} {:?} {:02x?}",
+            sid,
+            txn_id,
+            ep,
+            total_len,
+            pkt_len,
+            buf
+        );
+
+        if let Err(err) = iface_obj
+            .1
+            .isoc_xfer(txn_id, buf, ep, pkt_len, total_len, dir)
+        {
+            log::warn!(
+                "WinUsb_Read/WriteIsochPipeAsap failed ep 0x{:02x}, sid = {}, txn = {}, err = {}",
+                ep,
+                sid,
+                txn_id,
+                err
+            );
+            Err(protocol::Errors::TransferError)
+        } else {
+            Ok(DeviceOpResult::ManualCompletion)
+        }
     }
 }
 
@@ -3265,7 +3308,7 @@ impl USBStubEngine {
                 // Deal with data size limits
                 let mut total_len = 0;
                 let num_pkts = pkt_len.len();
-                #[cfg(target_os = "macos")]
+                #[cfg(any(windows, target_os = "macos"))]
                 if num_pkts > u32::MAX as usize {
                     return Err(protocol::Errors::RequestTooBig);
                 }
