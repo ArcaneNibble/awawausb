@@ -2,6 +2,7 @@
 rustflags = ["-Clinker-flavor=ld.lld", "-Clinker=rust-lld"]
 [target.x86_64-unknown-linux-musl]
 rustflags = ["-Clinker-flavor=ld.lld", "-Clinker=rust-lld"]
+
 [target.aarch64-pc-windows-gnullvm]
 rustflags = [
     "-Clinker=rust-lld",
@@ -14,3 +15,8 @@ rustflags = [
     "-L../../mingw-w64-minimal/x86_64-w64-mingw32/lib",
     "-Clink-arg=crt2.o",
 ]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-Clinker=rust-lld", "-Lxtra-macos", "-Clink-arg=-Fxtra-macos"]
+[target.x86_64-apple-darwin]
+rustflags = ["-Clinker=rust-lld", "-Lxtra-macos", "-Clink-arg=-Fxtra-macos"]
