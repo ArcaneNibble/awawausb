@@ -1,13 +1,17 @@
 <!DOCTYPE html>
 <html>
     <head>
+        <meta charset="utf-8">
         <title>WebUSB permission page</title>
         <link rel="stylesheet" href="permission.css"/>
     </head>
     <body>
         <header>A web page would like to access a USB device.</header>
-        <select id="dev_list" style="display: none;"></select>
-        <div id="dev_info" style="display: none;"></div>
+        <select class="device_display" id="dev_list" style="display: none;"></select>
+        <div class="device_display" id="dev_info" style="display: none;"></div>
+        <p class="click_ok">Click “OK” to allow this.</p>
+        <p>This lets the website talk with hardware plugged in to your computer. This goes beyond what websites are normally allowed to do. This can be very useful, but the browser cannot check everything the website or the USB device might do to your computer.</p>
+        <p>You should only allow this if you expect the website to be trying to access something “<abbr title="in real life">IRL</abbr>.”</p>
         <div><button id="submitbtn" type="submit">OK</button></div>
         <script src="permission.js"></script>
     </body>

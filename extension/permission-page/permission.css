@@ -1,3 +1,17 @@
+/* color scheme */
+:root {
+    --bg-color: #333;
+    --contrast-color: #555;
+    --txt-color: #e8e8e8;
+}
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg-color: #fff;
+        --contrast-color: #eee;
+        --txt-color: #000;
+    }
+}
+
 html {
     box-sizing: border-box;
     font-size: 100%;
@@ -11,4 +25,34 @@ html {
 
 body {
     margin: 0.5rem;
+
+    font-family:
+        -apple-system, BlinkMacSystemFont,
+        "Segoe UI",
+        "Liberation Sans",
+        sans-serif;
+
+    background-color: var(--bg-color);
+    color: var(--txt-color);
+}
+
+body > * {
+    margin-block-end: 0.3rem;
+}
+
+p {
+    text-wrap: balance;
+}
+
+.device_display {
+    max-width: 100%;
+    overflow: auto;
+}
+
+#dev_info {
+    background-color: var(--contrast-color);
+}
+
+.click_ok {
+    font-size: 1.1rem;
 }
