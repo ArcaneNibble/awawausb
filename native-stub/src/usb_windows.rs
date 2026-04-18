@@ -99,7 +99,6 @@ pub fn iocp_thread(iocp: usize) {
                     .expect("failed to write stdout");
             } else {
                 // Handle isoc completions
-                dbg!(&urbwrapper);
                 let mut had_unwanted_error = false;
                 let mut pkt_status;
                 let mut pkt_lens;
@@ -122,8 +121,7 @@ pub fn iocp_thread(iocp: usize) {
                         let mut data_buf = Vec::with_capacity(nbytes as usize);
                         for i in 0..num_pkts {
                             let pkt_i = &urbwrapper.isoc_rx_packets[i];
-
-                            pkt_status.push(if pkt_i.Status != 0 {
+                            pkt_status.push(if pkt_i.Status == 0 {
                                 crate::protocol::IsocPacketState::Ok
                             } else {
                                 had_unwanted_error = true;
@@ -192,6 +190,7 @@ pub fn zero_overlapped() -> OVERLAPPED {
     }
 }
 
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct IsocBufHandle(pub ptr::NonNull<c_void>);
 impl Drop for IsocBufHandle {
@@ -223,6 +222,8 @@ impl Debug for WindowsURBWrapper {
                 &self.overlapped.Anonymous.Pointer
             })
             .field("overlapped.hEvent", &self.overlapped.hEvent)
+            .field("isoc_buf_handle", &self.isoc_buf_handle)
+            .field("isoc_dummy_pkt_len", &self.isoc_dummy_pkt_len)
             .finish()
     }
 }
