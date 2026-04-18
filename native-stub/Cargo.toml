@@ -28,3 +28,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
 ] }
 windows-strings = "0.5"
+
+[profile.release]
+lto = true
+# FIXME: I have no idea how to get useful debug files
+# (https://github.com/rust-lang/rust/issues/105991)
+# nor how to do it only for certain platforms,
+# so... just give up and don't build debug info
+strip = true
