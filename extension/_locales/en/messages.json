@@ -1,0 +1,10 @@
+{
+    "permission_title": {
+        "message": "WebUSB permission page",
+        "description": "Title of the permission page"
+    },
+    "permission_hdr": {
+        "message": "A web page would like to access a USB device.",
+        "description": "First line (before device list) of the permission page"
+    }
+}

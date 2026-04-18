@@ -97,3 +97,11 @@ submitbtn.addEventListener('click', () => {
         window.close();
     }
 })
+
+// FIXME: Is there a better way to handle this?????
+let all_elems = document.getElementsByTagName("*");
+for (let elem of all_elems) {
+    if (elem.dataset.i18n !== undefined) {
+        elem.innerText = browser.i18n.getMessage(elem.dataset.i18n);
+    }
+}

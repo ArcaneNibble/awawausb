@@ -3,6 +3,8 @@
   "name": "awawausb",
   "version": "0.0",
 
+  "default_locale": "en",
+
   "description": "test",
 
   "browser_specific_settings": {
