@@ -174,7 +174,7 @@ pub struct USBInterfaceState {
     _macos_ep_addrs: Vec<u8>,
 }
 
-/// For the "new" API, whether operations on a device should send a completion *now* or not
+/// Indicates whether operations on a device should send a completion *now* or not
 pub enum DeviceOpResult {
     /// The request is already finished, and the framework should send an *empty* completion
     SendCompletionNow,
