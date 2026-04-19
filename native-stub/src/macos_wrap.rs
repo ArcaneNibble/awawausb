@@ -329,7 +329,6 @@ pub struct USBTransfer {
     /// given up ownership
     pub buf: Vec<u8>,
 
-    #[cfg(target_os = "macos")]
     _macos_iface: Option<Rc<RefCell<IOUSBInterfaceStruct>>>,
 }
 
