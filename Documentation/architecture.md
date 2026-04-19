@@ -184,9 +184,11 @@ The Windows driver model is built around notifying programs about devices that "
 
 This model is very much _not_ designed for something like WebUSB or similar software which provides "generic" access to talk to any device (after all, how do you talk to a device whose protocol you don't know?).
 
-WinUSB _does_ have an undocumented generic GUID called `GUID_DEVINTERFACE_WINUSB_WINRT`. As the name implies, it seems to be used by the [WinRT](https://learn.microsoft.com/en-us/uwp/api/windows.devices.usb?view=winrt-28000) generic USB APIs. However, that page implies that WinUSB may apply extra restrictions to access via this GUID, and the restrictions are very similar _but not identical_ to WebUSB's restrictions ("Image" and "Printer" are listed as prohibited, whereas they are not prohibited by WebUSB).
+WinUSB _does_ have an undocumented generic GUID called `GUID_DEVINTERFACE_WINUSB_WINRT`. As the name implies, it seems to be used by the [WinRT](https://learn.microsoft.com/en-us/uwp/api/windows.devices.usb?view=winrt-28000) generic USB APIs. However, that page implies that WinUSB may apply extra restrictions to access via this GUID, and the restrictions are very similar _but not identical_ to WebUSB's restrictions ("Image" and "Printer" are listed as prohibited interface classes, whereas they are not prohibited by WebUSB).
 
 To deal with all of this, this code asks for _all_ USB devices (upon startup) and hotplug notification about _all_ devices. It then manually checks whether or not they are WinUSB devices, looks up the `DeviceInterfaceGUIDs` requested by the device, and checks whether we are dealing with a desired GUID. This incidentally should avoid driver startup race conditions.
+
+Several steps in this enumeration process involve parsing strings, especially when there is no other way to get the desired information. One of these, [finding the interface number of composite devices](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/enumeration-of-interfaces-not-grouped-in-collections), is explicitly documented. The other is parsing `DEVPKEY_Device_LocationInfo` to get the port on the hub that the device is connected to. This does not appear to be documented, but there does not appear to be any better way to get the relevant information.
 
 ## Shortcomings
 
