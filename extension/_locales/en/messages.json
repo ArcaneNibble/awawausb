@@ -11,6 +11,14 @@
         "message": "An error occurred! $1",
         "description": "Button (browser action) tooltip if native process breaks"
     },
+    "notif_title": {
+        "message": "A WebUSB device was detected!",
+        "description": "Title of notifications, when a WebUSB device is detected"
+    },
+    "notif_body": {
+        "message": "Click here to open $1",
+        "description": "Body of notifications, telling the user to open the landing page"
+    },
     "permission_title": {
         "message": "WebUSB permission page",
         "description": "Title of the permission page"

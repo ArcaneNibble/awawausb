@@ -4,6 +4,20 @@
 // maintaining all global state related to USB.
 // It launches _once_ and maintains _one_ connection to the native stub.
 
+// Map of pending notifications
+let notification_toasts = new Map();
+browser.notifications.onClicked.addListener(async (notif_id) => {
+    let landing_page_url = notification_toasts.get(notif_id);
+    await browser.notifications.clear(notif_id);
+    console.log(`Opening ${landing_page_url}`);
+    await browser.tabs.create({
+        url: landing_page_url
+    });
+});
+browser.notifications.onClosed.addListener((notif_id) => {
+    notification_toasts.delete(notif_id);
+})
+
 // Open the debugging page
 browser.browserAction.onClicked.addListener(() => {
     browser.tabs.create({
@@ -1521,7 +1535,13 @@ nativeport.onMessage.addListener(async (m) => {
         }
 
         if (webusb_landing_page !== undefined) {
-            console.log("TODO: Do something WebUSB landing page", webusb_landing_page);
+            let notif_id = await browser.notifications.create("", {
+                type: "basic",
+                iconUrl: "icons/notification.png",
+                title: browser.i18n.getMessage("notif_title"),
+                message: browser.i18n.getMessage("notif_body", webusb_landing_page),
+            });
+            notification_toasts.set(notif_id, webusb_landing_page);
         }
 
         let global_usb_dev = {

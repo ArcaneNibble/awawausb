@@ -11,6 +11,14 @@
         "message": "出了问题！$1",
         "description": "Button (browser action) tooltip if native process breaks"
     },
+    "notif_title": {
+        "message": "你插入了WebUSB设备！",
+        "description": "Title of notifications, when a WebUSB device is detected"
+    },
+    "notif_body": {
+        "message": "点击来打开$1",
+        "description": "Body of notifications, telling the user to open the landing page"
+    },
     "permission_title": {
         "message": "WebUSB权限页面",
         "description": "Title of the permission page"

@@ -39,5 +39,5 @@
     "persistent": true
   },
 
-  "permissions": ["nativeMessaging"]
+  "permissions": ["nativeMessaging", "notifications"]
 }
