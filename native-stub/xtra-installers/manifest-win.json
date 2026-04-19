@@ -1,0 +1,7 @@
+{
+  "name": "awawausb_native_stub",
+  "description": "Allows WebUSB extension to access USB devices",
+  "path": "awawausb-native-stub.exe",
+  "type": "stdio",
+  "allowed_extensions": ["awawausb@arcanenibble.com"]
+}

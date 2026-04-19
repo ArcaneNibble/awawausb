@@ -116,6 +116,8 @@ RUN cp target/aarch64-unknown-linux-musl/release/awawausb-native-stub awawausb-n
 RUN cp target/x86_64-pc-windows-gnullvm/release/awawausb-native-stub.exe awawausb-native-stub/awawausb-native-stub-win-x86_64.exe
 RUN cp target/aarch64-pc-windows-gnullvm/release/awawausb-native-stub.exe awawausb-native-stub/awawausb-native-stub-win-aarch64.exe
 RUN cp xtra-installers/install.sh awawausb-native-stub/
+RUN cp xtra-installers/install.bat awawausb-native-stub/
+RUN cp xtra-installers/manifest-win.json awawausb-native-stub/
 RUN zip -r awawausb-native-stub-dist.zip awawausb-native-stub/
 
 FROM scratch
