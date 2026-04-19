@@ -3,6 +3,16 @@ name = "awawausb-native-stub"
 version = "0.0.0"
 edition = "2024"
 
+[package.metadata.docs.rs]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "aarch64-pc-windows-gnullvm",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-gnullvm",
+]
+
 [dependencies]
 base64 = "0.22"
 libc = "0.2"
