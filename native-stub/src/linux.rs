@@ -1,3 +1,8 @@
+//! Linux USB device enumeration helpers and completion handling
+//!
+//! The rest of the Linux support is strewn throughout `main.rs`
+//! and should probably eventually get refactored.
+
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -9,6 +14,7 @@ use std::ptr;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
+/// Helper function to read a sysfs file, because `dirfd` is not available in stable Rust
 pub fn read_entire_sysfs_file(dirfd: i32, filename: &CStr) -> io::Result<Option<Vec<u8>>> {
     let filefd =
         unsafe { libc::openat(dirfd, filename.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -25,6 +31,9 @@ pub fn read_entire_sysfs_file(dirfd: i32, filename: &CStr) -> io::Result<Option<
     rsfile.read_to_end(&mut ret)?;
     Ok(Some(ret))
 }
+
+// The following are FFI declarations corresponding to
+// linux/include/uapi/linux/usbdevice_fs.h
 
 pub const USBDEVFS_CAP_NO_PACKET_SIZE_LIM: u32 = 0x04;
 pub const USBDEVFS_CAP_REAP_AFTER_DISCONNECT: u32 = 0x10;
@@ -80,6 +89,7 @@ pub struct usbdevfs_urb {
     pub usercontext: *mut (),
 }
 
+/// A [usbdevfs_urb] with trailing [usbdevfs_iso_packet_desc]s as a DST
 #[allow(non_camel_case_types)]
 #[derive(Debug)]
 #[repr(C)]
@@ -110,14 +120,19 @@ impl usbdevfs_urb_with_iso {
     }
 }
 
+/// Deal with `char` having different signed-ness on different CPUs
 pub fn unfuck_bytes(x: &[libc::c_char]) -> &[u8] {
     unsafe { &*(x as *const [libc::c_char] as *const [u8]) }
 }
 
+/// A wrapper around a sysfs fd and a `/dev/bus/usb` device fd
 #[derive(Debug)]
 pub struct LinuxHandles {
     pub sysfs_fd: i32,
     pub dev_fd: i32,
+    /// A pointer back into the [USBStubEngine](crate::USBStubEngine),
+    /// which is used to control the size of the buffer that is needed
+    /// by the `kqueue` event loop.
     pub(crate) decr_event_count: *const Cell<usize>,
 }
 impl LinuxHandles {
@@ -129,6 +144,14 @@ impl LinuxHandles {
         }
     }
 
+    /// When changing configurations, redetect what the kernel thinks about interfaces
+    ///
+    /// This exists for two reasons:
+    /// 1. In case the kernel and us disagree about the interpretation of (likely malformed) USB descriptors
+    /// 2. In case a driver changes the active alternate setting on an interface.
+    ///    (It is not clear in the WebUSB spec how this ought to be handled…)
+    ///
+    /// If this is ever removed, we would no longer need to hang on to a sysfs dirfd handle.
     pub fn reprobe_ifaces(&self) -> io::Result<HashMap<u8, crate::USBInterfaceState>> {
         let dir = unsafe { libc::fdopendir(libc::fcntl(self.sysfs_fd, libc::F_DUPFD_CLOEXEC, 0)) };
         if dir.is_null() {
@@ -195,6 +218,7 @@ impl LinuxHandles {
         Ok(if_states)
     }
 
+    /// Check kernel capabilities, in case they're _way_ too old
     pub fn get_capabilities(&mut self) -> io::Result<u32> {
         let mut out = 0;
         unsafe {
@@ -220,12 +244,45 @@ impl Drop for LinuxHandles {
     }
 }
 
+/// A USB transfer which is currently in-flight
+///
+/// This wraps (and owns) both the URB submitted to the kernel,
+/// as well as the user data buffer.
+///
+/// ```text
+/// USBDevice._linux_timeout_urb  ------------+
+///                                           |
+/// kernel  -------------------------------+  |
+///                                        |  |
+///                  +----------+          |  |
+///                  v          |          v  v
+/// +-- LinuxURBWrapper --+     |    +-- usbdevfs_urb --+     +-- Vec<u8> payload --+
+/// | urb  ---------------------+--> | buffer  -------------> | <raw data>          |
+/// | buf  ------------------+  +----- usercontext      |     +---------------------+
+/// | ...                 |  |       | ...              |       ^
+/// +---------------------+  |       +------------------+       |
+///                          +----------------------------------+
+/// ```
+///
+/// Note the mutually-self-referential links between [LinuxURBWrapper] and [usbdevfs_urb].
+/// The kernel gives us back a pointer to `usbdevfs_urb`,
+/// which we use to extract the (raw) `usercontext` pointer to the `LinuxURBWrapper`,
+/// which we then convert back into an (owning) `Box`.
+///
+/// As a _huge_ hack, each USB device can have a single URB in flight which contains a timeout.
+/// A pointer to the appropriate (kernel) URB is stored in the
+/// [_linux_timeout_urb](crate::USBDevice::_linux_timeout_urb) field.
+/// This works because timeouts are only used during the setup/enumeration process
+/// on the web extension side (so no pages can have access to the device yet,
+/// and this part of the process is serialized).
+/// This will need to be redesigned if timeouts get used more generally.
 #[derive(Debug)]
 pub struct LinuxURBWrapper {
     pub txn_id: String,
     pub dir: crate::USBTransferDirection,
     pub buf: Vec<u8>,
     pub urb: Box<usbdevfs_urb>,
+    /// If a (internal-use-only) timeout exists, this contains a timerfd.
     pub _timeout_fd: i32,
 }
 impl LinuxURBWrapper {
@@ -286,6 +343,11 @@ impl Drop for LinuxURBWrapper {
     }
 }
 
+/// A USB isochronous transfer which is currently in-flight
+///
+/// This is almost identical to [LinuxURBWrapper] except that
+/// the kernel URB object is followed (in-line in memory) by
+/// a list of isochronous packet descriptors.
 #[derive(Debug)]
 pub struct LinuxIsoURBWrapper {
     pub txn_id: String,

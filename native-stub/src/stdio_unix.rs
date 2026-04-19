@@ -1,9 +1,11 @@
 //! Unix-specific handling of stdio, in order to intentionally bypass Rust checks
 //!
 //! It is not clear the extent to which this is necessary,
-//! but our IO is performed totally unbuffered. Writing is also performed using iovec.
+//! but our IO is performed totally unbuffered.
+//! We also write binary data rather than UTF-8 or "text".
 //!
-//! In the future, Windows will need to bypass Rust in order to handle binary data (not UTF-8).
+//! Writing is also performed using iovec, so that the length and payload are written
+//! as a single atomic chunk.
 
 use std::io;
 

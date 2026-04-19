@@ -1,3 +1,5 @@
+//! Handle udev hotplug notification packets
+
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -8,6 +10,7 @@ use std::u32;
 
 const MONITOR_GROUP_UDEV: u32 = 2;
 
+/// Compute a MurmurHash2, which is used to pre-filter packets
 pub const fn murmur_hash_2(mut key: &[u8], seed: u32) -> u32 {
     const M: u32 = 0x5bd1e995;
     const R: u32 = 24;
@@ -46,6 +49,10 @@ pub const fn murmur_hash_2(mut key: &[u8], seed: u32) -> u32 {
     h
 }
 
+/// Raw struct corresponding to the header of udev notification packets
+///
+/// See [here](https://github.com/systemd/systemd/blob/8df624bfdd658a68cf51825e30f60a39d34558da/src/libsystemd/sd-device/device-monitor.c#L72-L89)
+/// for the matching C code inside udev.
 #[repr(C)]
 #[derive(Debug)]
 pub struct UdevFeedcafeMessageHeader {
@@ -62,6 +69,7 @@ pub struct UdevFeedcafeMessageHeader {
     pub tag_bloom_lo: u32,
 }
 
+/// A single `key=value` property
 #[repr(C)]
 pub struct UdevProperty<'a> {
     pub key: &'a [u8],
@@ -76,6 +84,7 @@ impl<'a> Debug for UdevProperty<'a> {
     }
 }
 
+/// A DST corresponding to a udev packet header and its payload
 #[repr(C)]
 #[derive(Debug)]
 pub struct UdevFeedCafeMessage {
@@ -83,6 +92,7 @@ pub struct UdevFeedCafeMessage {
     pub payload: [u8],
 }
 impl UdevFeedCafeMessage {
+    /// Check that the packet we have is actually valid and usable
     pub fn mangle_and_validate(&mut self) -> Result<(), ()> {
         if &self.hdr.libudev_magic != b"libudev\x00" {
             return Err(());
@@ -118,6 +128,7 @@ impl UdevFeedCafeMessage {
         Ok(())
     }
 
+    /// Iterate through all the udev properties
     pub fn properties(&self) -> impl Iterator<Item = UdevProperty<'_>> {
         // Offset within what we have *declared as* `payload`
         let actual_payload_off =
@@ -144,6 +155,12 @@ impl UdevFeedCafeMessage {
     }
 }
 
+/// A wrapper around an fd used to receive from udev
+///
+/// This is currently hardcoded to expect the "subsystem" to be `usb`
+/// and the "devtype" to be `usb_device`.
+///
+/// Will automatically close the fd on drop
 #[derive(Debug)]
 pub struct UdevNetlinkSocket {
     pub fd: i32,
