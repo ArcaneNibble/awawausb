@@ -125,3 +125,49 @@ Finally, for the USB operations themselves, although it is not explicitly called
 Here, we are saved by another design choice: all in-flight transfers contain all of the data needed to send completion notifications. They don't require referencing data in the device or engine objects. This means that we can post the completions on a third thread, which exclusively handles IOCP packets and sending results to the web extension.
 
 The net result of all of this is that the main thread only has to handle hotplug and commands, and it multiplexes this using [`WaitForMultipleObjects`](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects).
+
+## Shortcomings
+
+The biggest flaw with the native stub is the amount of code duplication. This is a consequence of my not having understood the quirks of each platform before starting. As a consequence, a lot of code is not broken up into the most useful of abstraction boundaries.
+
+There are a lot of self-referential raw pointers in use. Hopefully this is all correct, but it has not been thoroughly audited.
+
+# Design of the background script
+
+The background script is (imho) fairly-typical JavaScript code. The feature which I feel most notable to document is the "outstanding transactions router". This is made up of all of the logic surrounding the `usb_txns` global variable.
+
+In order to be able to match up responses (e.g. data from a USB device) with the request that issued it, each request is assigned a "transaction ID". To the Rust code, this is an opaque string. However, the JavaScript code formats and parses it as `x-y`, where `x` and `y` are numbers (e.g. `1-5` or `0-26` or `45-1`).
+
+The first number indicates the page which issued the request. Page 0 is reserved for requests issued from the background script itself (which is used to fetch the WebUSB and additional string descriptors). Every time any other web page is opened, it is assigned a new page ID starting from 1 (hopefully you won't be able to open more than $2^{53}$ pages).
+
+If the request came from a page, the response message winds its way through a series of callbacks (used for updating state when necessary, such as when opening a device or claiming an interface), eventually ending in a `postMessage` call sending the appropriate data to the page.
+
+If the request came from the background script itself, the `usb_txns` variable stores the `resolve` and `reject` functions for the relevant `Promise`. Responses from the native stub will end up calling one or the other, thereby converting the message-passing interface into JavaScript async.
+
+## Auxiliary pages
+
+The extension has a "debug" page which can request dumps of the JavaScript internal state. This uses the "one-off" messaging interface in a request-response manner.
+
+In order to invoke the user permission page, the only mechanism that appeared to be available to send it information was to use query parameters. Each permission prompt is assigned an incrementing numeric ID (to match up approvals/denials with the appropriate page making the request). The permission page is given only the bare "session ID" of USB devices matching the filter, and it likewise uses a request-response message to request further information such as the device strings.
+
+## Shortcomings
+
+The biggest issue with this code is that it has not been refactored or otherwise restructured, and so it primarily consists of several gigantic functions.
+
+# Design of the content scripts
+
+## Isolated script
+
+I am going start by admitting that I don't entirely understand the security model of content scripts, despite reading the explanation of "Xray vision" in the documentation.
+
+There are two content scripts needed for each page, an "isolated" script and a "main" script. The reason that this is required is because I could not figure out how (or if) it was possible to expose complex objects such as classes to the web page from an isolated script. This can be straightforwardly done from a "main" script. However, it isn't possible to use runtime messaging from the "main" script.
+
+However, the documentation _did_ have a clear and obvious example of how to expose `Promise`s from the isolated script to the main script. The isolated script therefore exposes an _async_ function to the main script, and it uses a `Map` (just like the background script) to translate between messages and `Promise`s.
+
+The isolated script also accepts and holds on to a callback from the main script in order to send it events (for device connection/disconnection).
+
+All "magic" interface methods are injected into the global `window` scope but are immediately deleted once the "main" script runs. Hopefully this is safe.
+
+## Main script
+
+This script implements the WebUSB API surface. It mostly consists of large amounts of "glue", especially relating to handling the types for USB descriptors.
