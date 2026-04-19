@@ -76,7 +76,7 @@ Some consequences of these architectural choices:
 
 - the native stub does not know anything about web pages at all. Although it happens to implement the VID/PID blocklist, it is primarily focused on dealing with operating system APIs. It does not handle any WebUSB-specific security concerns. This is okay because it isn't able to do anything beyond what "any other random program" on the computer could also do.
 - the extension background script is important for security. It is responsible for making sure web pages cannot access anything the user has not granted permissions for.
-- because there is _one_ extension background script and _one_ native stub serving _multiple_ pages, the background script also needs to track the number of pages that have a device open and which (if any) pages have "claimed" an interface for exclusive access.
+- because there is _one_ extension background script and _one_ native stub serving _multiple_ pages, the background script also needs to track the number of pages that have opened the same device and which (if any) pages have "claimed" an interface for exclusive access. This sharing/multiplexing/reference-counting would normally be handled by the operating system's USB stack, but we need to duplicate bits of the functionality.
 - redundant information is stored in multiple places. Because so many of the relevant APIs are built around message passing (and not state sharing), there exists a high probability that state can get out of sync due to programming mistakes. There is currently no architectural mitigations for this other than "being careful" (which is not really a mitigation).
 
 # Design of the native stub
@@ -106,13 +106,25 @@ macOS uses the `kqueue` syscall in the runloop to wait for events. `stdin` is ad
 
 This functionality _is_ documented, just not well. The USB interfaces in `IOUSBLib` in particular explicitly support doing this. The key function which bridges the "Mach world" and the "IOKit world" is `IODispatchCalloutFromMessage`.
 
+macOS uses both device handles and interface handles, but macOS, usefully, allows opening a handle to interfaces without claiming them (including to interfaces that we _can't_ claim because a kernel driver is bound). The native stub therefore eagerly tries to open a handle to every single interface as soon as possible. (Other Chromium-derivatives with WebUSB capabilities appear to keep open the device but not individual interfaces, according to IORegistryExplorer.)
+
+When switching configurations, all interfaces are closed and reopened.
+
+macOS does not use endpoint addresses but "pipeRef" indices, and macOS doesn't seem to guarantee that these match up with "the order endpoints are declared in the descriptor". Because of this, a bunch of shuffling is needed to maintain a map of endpoint addresses to pipeRefs.
+
 ## Linux
 
 Linux uses the `epoll` family of syscalls to wait for events. `stdin` is added in order to handle requests from the browser. udev device notifications are delivered over a [netlink socket](https://man7.org/linux/man-pages/man7/netlink.7.html), which, because it is a socket, can obviously be added to epoll as well.
 
 Although the [official documentation](https://docs.kernel.org/driver-api/usb/usb.html#asynchronous-i-o-support) for Linux only mentions getting completion notifications using [signals](https://man7.org/linux/man-pages/man7/signal.7.html), it is and has always been [in fact possible to use `poll`/`epoll`](https://github.com/torvalds/linux/blob/bf4afc53b77aeaa48b5409da5c8da6bb4eff7f43/drivers/usb/core/devio.c#L2839-L2844). Note that the semantics are a bit fuzzy, since completions are indicated with `EPOLLOUT` even though `write` is never used.
 
+The Linux code reads metadata such as cached descriptors from sysfs in order to try to minimize unnecessary bus traffic. sysfs does not seem to be guaranteed to be race-free, but we try and minimize race conditions by opening an fd for the sysfs _directory_.
+
+Linux is the most direct match to WebUSB's programming model, in that it only requires opening one handle to the device. All interfaces are routed through this single handle.
+
 ## Windows
+
+### Threading
 
 Windows is the anomaly in that it is very eager to spawn threads in ways that you cannot fully control. Windows also does not have a single universal IO multiplexer that works in all cases.
 
@@ -125,6 +137,26 @@ Finally, for the USB operations themselves, although it is not explicitly called
 Here, we are saved by another design choice: all in-flight transfers contain all of the data needed to send completion notifications. They don't require referencing data in the device or engine objects. This means that we can post the completions on a third thread, which exclusively handles IOCP packets and sending results to the web extension.
 
 The net result of all of this is that the main thread only has to handle hotplug and commands, and it multiplexes this using [`WaitForMultipleObjects`](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects).
+
+### Devices vs interfaces
+
+In order to make everything even more complicated than has already been described, Windows does _not_ (generally) support opening a handle to "the device" as a whole. It is only possible to open a handle to a _driver_. In the "simplest" case, one driver will be bound to the entire device. However, if the device has multiple interfaces _in a way that is compatible with the "USB generic parent driver (usbccgp.sys)"_, multiple drivers can be bound to different subsets of the interfaces. For example, a device can contain two interfaces, each bound to the WinUSB driver. A device could also contain two interfaces where one is bound to the HID driver and the other to WinUSB. In some cases where this happens, each driver corresponds to _one_ interface. However, this will not be the case if the device makes use of the "Interface Association Descriptors" USB ECN. If IADs are in use, each driver (including WinUSB) can control multiple interfaces (yet still not the entirety of the device).
+
+For even more fun, Windows makes no guarantees that all drivers for a device will be ready at the same time. This code attempts to correctly glue every (WinUSB) interface of a device back together, in spite of this, even when IADs are involved.
+
+Windows also does not allow "claiming" only subsets of the interfaces, and an open of the WinUSB driver automatically claims all interfaces covered by that instance of the driver. Worse yet, the driver can only be accessed by going through the "primary" interface. The code attempts to use reference counting to patch up the semantics of this so that it matches WebUSB as best as it can.
+
+Finally, accessing cached descriptors of a device needs to be done by sending requests to the hub a device is plugged in to (which can be a root hub). This code automatically traverses up the device tree in order to do this.
+
+### Enumeration quirks
+
+The Windows driver model is built around notifying programs about devices that "speak a certain protocol" (have a certain _device interface class_, identified by a GUID). This is designed for an ecosystem where different vendors ship their own unique and incompatible devices (which might all happen to use the WinUSB kernel driver) and want to write their own software which only speaks to their devices. Their software can easily ask Windows to filter for only their GUID.
+
+This model is very much _not_ designed for something like WebUSB or similar software which provides "generic" access to talk to any device (after all, how do you talk to a device whose protocol you don't know?).
+
+WinUSB _does_ have an undocumented generic GUID called `GUID_DEVINTERFACE_WINUSB_WINRT`. As the name implies, it seems to be used by the [WinRT](https://learn.microsoft.com/en-us/uwp/api/windows.devices.usb?view=winrt-28000) generic USB APIs. However, that page implies that WinUSB may apply extra restrictions to access via this GUID, and the restrictions are very similar _but not identical_ to WebUSB's restrictions ("Image" and "Printer" are listed as prohibited, whereas they are not prohibited by WebUSB).
+
+To deal with all of this, this code asks for _all_ USB devices (upon startup) and hotplug notification about _all_ devices. It then manually checks whether or not they are WinUSB devices, looks up the `DeviceInterfaceGUIDs` requested by the device, and checks whether we are dealing with a desired GUID. This incidentally should avoid driver startup race conditions.
 
 ## Shortcomings
 
