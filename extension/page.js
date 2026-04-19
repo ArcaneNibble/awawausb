@@ -206,6 +206,8 @@
             throw new DOMException("Wrong endpoint type", "InvalidAccessError");
         } else if (e.error === "wrong_len") {
             throw new DOMException("Wrong buffer size", "DataError");
+        } else if (e.error === "protected_interface") {
+            throw new DOMException("Interface has a protected class", "SecurityError");
         } else {
             throw new DOMException("Transfer error", "NetworkError");
         }

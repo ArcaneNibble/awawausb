@@ -1,22 +1,6 @@
-pub fn is_protected_class(interface_class: u8) -> bool {
-    match interface_class {
-        0x01 |  // Audio
-        0x03 |  // HID (Human Interface Device)
-        0x08 |  // Mass Storage
-        0x0B |  // Smart Card
-        0x0E |  // Video
-        0x10 |  // Audio/Video Devices
-        0xE0    // Wireless Controller 
-        => true,
-        _ => false,
-    }
-}
-
 pub fn is_blocked_device(vid: u16, pid: u16) -> bool {
     // XXX this doesn't support bcdDevice filtering, because there are no such examples
     match (vid, pid) {
-        (0, 3) |    // testing
-
         (0x096e, 0x0850) |  // KEY-ID
         (0x096e, 0x0852) |  // Feitian
         (0x096e, 0x0853) |  // Feitian

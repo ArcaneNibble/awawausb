@@ -869,6 +869,18 @@ browser.runtime.onConnect.addListener((p) => {
                 return;
             }
 
+            // Is it an interface forbidden for web apps?
+            let conf_desc = page_usb_dev.global_usb_dev.config_lookup.get(page_usb_dev.global_usb_dev.current_config);
+            console.log(conf_desc);
+            if (conf_desc.interfaces_blocked.get(iface) !== false) {
+                p.postMessage({
+                    txn_id: m.txn_id,
+                    success: false,
+                    error: "protected_interface",
+                });
+                return;
+            }
+
             // Ok, we can finally try to claim the interface
             let global_txn_id = `${this_page_id}-${m.txn_id}`;
             page_usb_dev.queue_transaction(global_txn_id, m.txn_id, iface, (res) => {
@@ -1385,6 +1397,7 @@ nativeport.onMessage.addListener(async (m) => {
             }
 
             // Interfaces (some shuffling needed to be convenient for webusb order)
+            let interfaces_blocked = new Map();
             let interfaces = new Array();
             let binterface_to_idx = new Map();
             for (let intf of cfg.interfaces) {
@@ -1400,6 +1413,21 @@ nativeport.onMessage.addListener(async (m) => {
 
                 if (cfg.bConfigurationValue === m.current_config)
                     iface_claimed[intf.bInterfaceNumber] = null;
+
+                // Check if this interface is blocked
+                let is_blocked =
+                    (intf.bInterfaceClass === 0x01) ||  // Audio
+                    (intf.bInterfaceClass === 0x03) ||  // HID (Human Interface Device)
+                    (intf.bInterfaceClass === 0x08) ||  // Mass Storage
+                    (intf.bInterfaceClass === 0x0B) ||  // Smart Card
+                    (intf.bInterfaceClass === 0x0E) ||  // Video
+                    (intf.bInterfaceClass === 0x10) ||  // Audio/Video Devices
+                    (intf.bInterfaceClass === 0xE0);    // Wireless Controller
+                if (is_blocked) {
+                    interfaces_blocked.set(intf.bInterfaceNumber, true);
+                } else if (!interfaces_blocked.has(intf.bInterfaceNumber)) {
+                    interfaces_blocked.set(intf.bInterfaceNumber, false);
+                }
 
                 // Interface (alternate) name string
                 let intf_name = null;
@@ -1438,6 +1466,7 @@ nativeport.onMessage.addListener(async (m) => {
                 config_name,
                 interfaces,
 
+                interfaces_blocked,
                 ep_to_idx,
             };
             configs.push(config_obj);
