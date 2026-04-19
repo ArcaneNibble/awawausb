@@ -1,0 +1,22 @@
+{
+    "permission_title": {
+        "message": "WebUSB权限页面",
+        "description": "Title of the permission page"
+    },
+    "permission_hdr": {
+        "message": "有个网页想打开一个USB设备。",
+        "description": "First line (before device list) of the permission page"
+    },
+    "permission_click_ok": {
+        "message": "如果你允许，请点击“OK”。",
+        "description": "Permission page message, for \"click ok\""
+    },
+    "permission_p1": {
+        "message": "如果你允许，这网页就可以跟计算机硬件沟通。网页平常没有这个功能。这可能非常有用，但是浏览器没法完全限制网页或设备能做的。",
+        "description": "Permission page explanation, paragraph 1"
+    },
+    "permission_p2": {
+        "message": "只有当你想要这网页能跟现实的设备沟通，才允许。",
+        "description": "Permission page explanation, paragraph 2"
+    }
+}
