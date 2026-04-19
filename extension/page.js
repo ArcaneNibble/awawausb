@@ -9,6 +9,10 @@
 (function() {
     const DEBUG_DISABLE_TRANSIENT_ACTIVATION = true;
 
+    if (!window.isSecureContext) {
+        return;
+    }
+
     // "Global" objects and event handling
     let the_usb_obj;
     window.USBConnectionEvent = class extends Event {
