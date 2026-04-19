@@ -1,3 +1,5 @@
+//! macOS USB device access
+
 use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::rc::Rc;
@@ -12,6 +14,10 @@ use libc::{kern_return_t, mach_port_t};
 
 use super::macos_sys::*;
 
+// The following functions are duplicated because they return different types
+// FIXME: consider consolidating them somehow
+
+/// Retrieve the specified string from the I/O Registry
 pub fn get_usb_cached_string(obj: io_object_t, s: &'static str) -> Option<String> {
     let string = unsafe {
         IORegistryEntryCreateCFProperty(
@@ -31,6 +37,7 @@ pub fn get_usb_cached_string(obj: io_object_t, s: &'static str) -> Option<String
     None
 }
 
+/// Retrieve `bMaxPacketSize0` from the I/O Registry
 pub fn get_max_pkt_0(obj: io_object_t) -> Option<u8> {
     let pktsz = unsafe {
         IORegistryEntryCreateCFProperty(
@@ -52,6 +59,7 @@ pub fn get_max_pkt_0(obj: io_object_t) -> Option<u8> {
     None
 }
 
+/// Retrieve `bcdUSB` from the I/O Registry
 pub fn get_bcd_usb(obj: io_object_t) -> Option<u16> {
     let bcdusb = unsafe {
         IORegistryEntryCreateCFProperty(
@@ -73,6 +81,7 @@ pub fn get_bcd_usb(obj: io_object_t) -> Option<u16> {
     None
 }
 
+/// Retrieve `sessionID` from the I/O Registry
 pub fn get_session_id(obj: io_object_t) -> Option<u64> {
     let sessionid = unsafe {
         IORegistryEntryCreateCFProperty(
@@ -94,9 +103,13 @@ pub fn get_session_id(obj: io_object_t) -> Option<u64> {
     None
 }
 
+/// A safe(-ish) wrapper for `IOUSBDeviceStruct`nnn
 #[derive(Debug)]
 pub struct IOUSBDeviceStruct(
     *mut *const IOUSBDeviceStruct320,
+    /// A pointer back into the [USBStubEngine](crate::USBStubEngine),
+    /// which is used to control the size of the buffer that is needed
+    /// by the `kqueue` event loop.
     pub(crate) *const Cell<usize>,
 );
 #[allow(non_snake_case)]
@@ -302,11 +315,11 @@ impl Drop for IOUSBDeviceStruct {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PipeProperties {
-    direction: u8,
-    number: u8,
-    transfer_type: u8,
-    max_packet_size: u16,
-    interval: u8,
+    pub direction: u8,
+    pub number: u8,
+    pub transfer_type: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
 }
 
 /// A USB transfer which is currently in-flight
@@ -315,6 +328,27 @@ pub struct PipeProperties {
 ///
 /// When the transfer has been submitted, this struct is "owned by"
 /// the operating system. We reclaim ownership when we get a completion.
+///
+/// ```text
+/// +-- OS-internal state --+
+/// | buffer  ------------------------------------------+
+/// | callback refcon       |                           |
+/// | ...        |          |                           |
+/// +----------- | ---------+                           |
+///              |                                      |
+///              |      +-- USBTransfer --+             v
+///              +----> | ...             |        +-- Vec<u8> payload --+
+///                     | buf  ------------------> | <raw data>          |
+///                     | _macos_iface  ------+    +---------------------+
+///                     +-----------------+   |
+///                                           |
+///                                           |
+///                                           v
+/// +-- USBDevice --+             +-- Rc<RefCell<IOUSBInterfaceStruct>> --+
+/// | <indirection> ------------> | <operating system handle>             |
+/// | ...           |             +---------------------------------------+
+/// +---------------+
+/// ```
 #[derive(Debug)]
 pub struct USBTransfer {
     pub dir: crate::USBTransferDirection,
@@ -333,6 +367,31 @@ pub struct USBTransfer {
 }
 
 /// A USB transfer's metadata, specifically for isochronous requests
+///
+/// ```text
+/// +-- OS-internal state --+
+/// | isoc frames  ---------------------------------------------------------------+
+/// | buffer  ---------------------------------------------+                      |
+/// | callback refcon       |                              |                      |
+/// | ...        |          |                              |                      |
+/// +----------- | ---------+                              |                      |
+///              |                                         |                      |
+///              |      +-- USBTransfer --+                v                      |
+///              +----> | ...             |           +-- Vec<u8> payload --+     |
+///                     | buf  ---------------------> | <raw data>          |     |
+///                     | _macos_frames  --------+    +---------------------+     |
+///                     | _macos_iface  ------+  |                                |
+///                     +-----------------+   |  |    +-- [IOUSBIsocFrame] --+    |
+///                                           |  +--> | frame #0             | <--+
+///                                           |       | frame #1             |
+///                                           |       | ...                  |
+///                                           |       +----------------------+
+///                                           v
+/// +-- USBDevice --+             +-- Rc<RefCell<IOUSBInterfaceStruct>> --+
+/// | <indirection> ------------> | <operating system handle>             |
+/// | ...           |             +---------------------------------------+
+/// +---------------+
+/// ```
 #[derive(Debug)]
 pub struct USBTransferIsoc {
     pub dir: crate::USBTransferDirection,
@@ -344,9 +403,13 @@ pub struct USBTransferIsoc {
     _macos_iface: Rc<RefCell<IOUSBInterfaceStruct>>,
 }
 
+/// A safe(-ish) wrapper for `IOUSBInterfaceStruct`nnn
 #[derive(Debug)]
 pub struct IOUSBInterfaceStruct(
     *mut *const IOUSBInterfaceStruct197,
+    /// A pointer back into the [USBStubEngine](crate::USBStubEngine),
+    /// which is used to control the size of the buffer that is needed
+    /// by the `kqueue` event loop.
     pub(crate) *const Cell<usize>,
 );
 #[allow(non_snake_case)]
@@ -453,6 +516,7 @@ impl IOUSBInterfaceStruct {
         }
     }
 
+    /// Returns a list of `bEndpointAddress` addresses, in `pipeRef` order
     pub fn get_ep_addrs(&mut self) -> Vec<u8> {
         if let Ok(num_eps) = self.GetNumEndpoints() {
             let mut ep_addrs = Vec::with_capacity(num_eps as usize);
@@ -618,6 +682,7 @@ impl Drop for IOUSBInterfaceStruct {
     }
 }
 
+/// Raw completion handler for non-isoc requests
 extern "C" fn iokit_usb_completion(
     refcon: *const (),
     result: libc::kern_return_t,
@@ -679,6 +744,7 @@ extern "C" fn iokit_usb_completion(
     // n.b. the xfer will now be deallocated automagically
 }
 
+/// Raw completion handler for isoc requests
 extern "C" fn iokit_usb_completion_isoc(
     refcon: *const (),
     result: libc::kern_return_t,

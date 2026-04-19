@@ -1,3 +1,5 @@
+//! macOS FFI bindings, primarily `IOKit` and `IOUSBLib`
+
 use std::ptr;
 
 use core_foundation::{
@@ -7,6 +9,16 @@ use core_foundation::{
 };
 use libc::{kern_return_t, mach_port_t, size_t};
 
+/// A Mach message, used by IOKit, where we don't look inside
+///
+/// Dynamically querying the size of a Mach message requires additional steps,
+/// and in practice we know that these messages have a maximum size
+/// (see e.g. [here](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/iokit/IOKit/OSMessageNotification.h#L143-L150)
+/// and [here](https://github.com/apple-oss-distributions/IOKitUser/blob/1a6b2d14f7834563cc677d181c1a2f4cdfdf49dc/IOKitLib.c#L1183)),
+/// so we just declare something that will be "definitely" big enough.
+///
+/// We do need to make sure this is adequately aligned, so we just
+/// conservatively align to 8 bytes.
 #[repr(C, align(8))]
 pub struct OpaqueMachMessage {
     _data: [u8; 4096],
@@ -103,6 +115,9 @@ impl CFUUIDBytes {
     }
 }
 
+/// Any IOKit object which is implemented using Mach ports
+///
+/// We don't actually declare/check all the correct types.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[repr(transparent)]

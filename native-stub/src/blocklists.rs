@@ -1,3 +1,8 @@
+//! This module is a manually-imported and reformatted version of `blocklist.txt`
+
+/// Returns `true` iff the specified device should be blocked
+///
+/// A blocked device will not even be shown to the web extension at all
 pub fn is_blocked_device(vid: u16, pid: u16) -> bool {
     // XXX this doesn't support bcdDevice filtering, because there are no such examples
     match (vid, pid) {
