@@ -32,11 +32,11 @@
         "description": "Permission page message, for \"click ok\""
     },
     "permission_p1": {
-        "message": "如果你允许，这网页就可以跟计算机硬件沟通。网页平常没有这个功能。这可能非常有用，但是浏览器没法完全限制网页或设备能做的。",
+        "message": "如果你允许，这网页就可以跟计算机的插入硬件沟通。网页平常没有这个功能。这个功能可能非常有用，但是浏览器没法完全限制网页或插入设备的所做所为。",
         "description": "Permission page explanation, paragraph 1"
     },
     "permission_p2": {
-        "message": "只有当你想要这网页能跟现实的设备沟通，才允许。",
+        "message": "只有当你真正想要这网页能跟计算机上的真实设备沟通，你才应该给与这个允许。",
         "description": "Permission page explanation, paragraph 2"
     }
 }
