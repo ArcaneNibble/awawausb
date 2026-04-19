@@ -34,6 +34,13 @@ set -e
 
 # Copy the binary
 mkdir -p "$install_loc"
+
+# If we're on a Mac, weird things can happen with replacing files?
+if [ "$os" = Darwin ]; then
+    rm -f "$install_loc/awawausb-native-stub"
+fi
+
+# Actual copy
 cp "$binary" "$install_loc/awawausb-native-stub"
 
 # If we're on a Mac, get rid of this
