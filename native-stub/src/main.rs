@@ -28,6 +28,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(any(windows, target_os = "linux"))]
 use usb_ch9::USBDescriptor;
 
+pub mod blocklists;
 pub mod protocol;
 
 #[cfg(target_os = "linux")]
@@ -535,6 +536,16 @@ impl USBDevice {
             );
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         };
+
+        // If a device is blocked, don't report it or otherwise continue
+        if blocklists::is_blocked_device(dev_desc.idVendor, dev_desc.idProduct) {
+            log::info!(
+                "Device {:04x}:{:04x} is blocked",
+                { dev_desc.idVendor },  //
+                { dev_desc.idProduct }  //
+            );
+            return Ok(());
+        }
 
         // Get extra data
         let mut manufacturer = read_entire_sysfs_file(sysfs_dirfd, c"manufacturer")?;
@@ -1329,6 +1340,12 @@ impl USBDevice {
         let iProduct = usb_dev.USBGetProductStringIndex()?;
         let iSerialNumber = usb_dev.USBGetSerialNumberStringIndex()?;
         let bNumConfigurations = usb_dev.GetNumberOfConfigurations()?;
+
+        // If a device is blocked, don't report it or otherwise continue
+        if blocklists::is_blocked_device(idVendor, idProduct) {
+            log::info!("Device {:04x}:{:04x} is blocked", idVendor, idProduct);
+            return Ok(());
+        }
 
         let dev_desc = usb_ch9::ch9_core::DeviceDescriptor {
             bLength: std::mem::size_of::<usb_ch9::ch9_core::DeviceDescriptor>() as u8,

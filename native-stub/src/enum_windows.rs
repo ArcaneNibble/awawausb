@@ -934,6 +934,16 @@ fn probe_winusb_device_further(
             ))?
             .0;
 
+        // If a device is blocked, don't report it or otherwise continue
+        if crate::blocklists::is_blocked_device(dev_desc.idVendor, dev_desc.idProduct) {
+            log::info!(
+                "Device {:04x}:{:04x} is blocked",
+                { dev_desc.idVendor },  //
+                { dev_desc.idProduct }  //
+            );
+            return Ok(None);
+        }
+
         let mut config_descs = Vec::new();
         for cfg_i in 0..dev_desc.bNumConfigurations {
             let cfg_desc = hub_handle.get_descriptor(
