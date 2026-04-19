@@ -892,8 +892,6 @@ impl USBDevice {
             )
         };
         if ret != 0 {
-            // let mut mac_iface_obj = (*self._macos_ifaces[iface_state._macos_iface_idx]).borrow_mut();
-            // if let Err(ret) = mac_iface_obj.SetAlternateInterface(alt) {
             log::warn!(
                 "SET_INTERFACE failed {} = {:02x}, sid = {}, txn = {}, err = {} ",
                 iface,
