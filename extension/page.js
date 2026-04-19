@@ -7,7 +7,8 @@
 // all data as suspect within the *background* script.
 
 (function() {
-    const DEBUG_DISABLE_TRANSIENT_ACTIVATION = true;
+    // This can be disable for testing, because the console doesn't grant transient activation
+    const DEBUG_DISABLE_TRANSIENT_ACTIVATION = false;
 
     if (!window.isSecureContext) {
         return;
