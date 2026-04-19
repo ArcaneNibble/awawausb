@@ -1,3 +1,5 @@
+//! Windows USB device access
+
 use std::ffi::{OsStr, c_void};
 use std::fmt::Debug;
 use std::os::windows::ffi::OsStrExt;
@@ -12,6 +14,7 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::IO::{GetQueuedCompletionStatus, OVERLAPPED, OVERLAPPED_0};
 use windows_sys::Win32::System::Threading::INFINITE;
 
+/// Thread function that receives IOCPs and sends data out on stdout
 pub fn iocp_thread(iocp: usize) {
     let iocp = iocp as HANDLE;
     loop {
@@ -177,7 +180,8 @@ pub fn iocp_thread(iocp: usize) {
     }
 }
 
-pub fn zero_overlapped() -> OVERLAPPED {
+/// Initializes an all-zero [OVERLAPPED]
+fn zero_overlapped() -> OVERLAPPED {
     OVERLAPPED {
         Internal: 0,
         InternalHigh: 0,
@@ -188,6 +192,7 @@ pub fn zero_overlapped() -> OVERLAPPED {
     }
 }
 
+/// RAII wrapper for "registering" isochronous transfer buffers
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct IsocBufHandle(pub ptr::NonNull<c_void>);
@@ -199,6 +204,29 @@ impl Drop for IsocBufHandle {
     }
 }
 
+/// A USB transfer which is currently in-flight
+///
+/// A unified structure is used for both non-isoc and isoc transfers.
+///
+/// ```text
+///                           IOCP                    +-- OS-internal state --+
+///                             |                     |  |  |              |  |
+/// +-- WindowsURBWrapper --+   |  <-\                +--|--|--------------|--+
+/// | ...                   |   |    |- known offset     |  |              |
+/// | +-- OVERLAPPED --+ <------+  <-/                   |  |              |
+/// | | ...            |    |   |             +----------+  |              |
+/// | +----------------+    |   +-------------+             v              |
+/// |                       |                      +-- Vec<u8> payload --+ |
+/// | buf  --------------------------------------> | <raw data>          | |
+/// |                       |                      +---------------------+ |
+/// | isoc_rx_packets-----------+                                          |
+/// | ...                   |   |                                          v
+/// +-----------------------+   |                  +-- Vec<USBD_ISO_PACKET_DESCRIPTOR> payload --+
+///                             +----------------> | frame #0                                    |
+///                                                | frame #1                                    |
+///                                                | ...                                         |
+///                                                +---------------------------------------------+
+/// ```
 pub struct WindowsURBWrapper {
     pub txn_id: String,
     pub dir: crate::USBTransferDirection,
@@ -226,6 +254,10 @@ impl Debug for WindowsURBWrapper {
     }
 }
 
+/// A wrapper around a WinUSB handle
+///
+/// If this handle is the "primary" one, then [raw_handle](Self::raw_handle) contains a Win32 handle.
+/// Otherwise, `raw_handle` is `INVALID_HANDLE_VALUE` and only [winusb_handle](Self::winusb_handle) is valid.
 #[derive(Debug)]
 pub struct WinUSBHandle {
     pub raw_handle: HANDLE,

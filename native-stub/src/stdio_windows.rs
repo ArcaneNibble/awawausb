@@ -1,3 +1,9 @@
+//! Unix-specific handling of stdio, in order to intentionally bypass Rust checks
+//!
+//! It is especially important on Windows that we are able to write binary data instead of text.
+//!
+//! Handling stdin requires a separate thread. See `architecture.md` for more information.
+
 use std::cell::RefCell;
 use std::io;
 use std::ptr;
@@ -10,6 +16,7 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Console::*;
 use windows_sys::Win32::System::Threading::*;
 
+/// stdin reader thread function
 fn stdin_read_thread(event: usize, tx: mpsc::Sender<io::Result<Vec<u8>>>) {
     let event = event as HANDLE;
     let stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
@@ -77,6 +84,9 @@ fn stdin_read_thread(event: usize, tx: mpsc::Sender<io::Result<Vec<u8>>>) {
     log::debug!("Bye from stdin reading thread!");
 }
 
+/// State for the stdin reader thread
+///
+/// Note that this implements a hack to implement "peek" functionality.
 #[derive(Debug)]
 pub struct WinStdinReader {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,

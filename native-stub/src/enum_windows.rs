@@ -1,3 +1,5 @@
+//! Handles device enumeration and hotplug on Windows
+
 use std::alloc::Layout;
 use std::collections::{HashMap, hash_map};
 use std::error;
@@ -27,6 +29,7 @@ use crate::{NullU16, OsStringFromWideWithNull};
 
 const BOS_DESCRIPTOR_TYPE: u8 = 15;
 
+/// `USB_DESCRIPTOR_REQUEST` but with a DST payload
 #[repr(C, packed(1))]
 #[allow(non_snake_case)]
 struct USB_DESCRIPTOR_REQUEST_WORKS {
@@ -39,6 +42,9 @@ struct USB_DESCRIPTOR_REQUEST_WORKS {
     data: [u8],
 }
 
+/// `USB_DESCRIPTOR_REQUEST` with a fixed 4-byte payload
+///
+/// This is sufficient for requesting the bytes which contain the true descriptor length.
 #[repr(C, packed(1))]
 #[allow(non_snake_case)]
 struct USB_DESCRIPTOR_REQUEST_INITIAL {
@@ -51,6 +57,7 @@ struct USB_DESCRIPTOR_REQUEST_INITIAL {
     data: [u8; 4],
 }
 
+/// A GUID, except it's possible to [Debug] and compare it
 struct UnfuckedGUID(GUID);
 impl Debug for UnfuckedGUID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,6 +83,10 @@ impl PartialEq for UnfuckedGUID {
 }
 impl Eq for UnfuckedGUID {}
 
+/// Possible errors that can happen during device enumeration
+///
+/// This is because this is by far the most complicated process across all platforms.
+/// We need to "stitch together" multiple independent interfaces back into a single logical "device".
 #[derive(Debug)]
 pub enum WinEnumerationError {
     CfgMgr32Error(CfgMgrError),
@@ -125,6 +136,9 @@ impl From<io::Error> for WinEnumerationError {
     }
 }
 
+/// Errors which can be returned by the CfgMgr32 API
+///
+/// This exists because this API does not use standard Win32 errors.
 #[derive(Debug)]
 pub struct CfgMgrError(pub u32);
 impl error::Error for CfgMgrError {}
@@ -201,6 +215,11 @@ impl Display for CfgMgrError {
     }
 }
 
+/// Try to turn a GUID string, with `{}` brackets and `-` separators, into a [GUID]
+///
+/// This is the format generally found in places such as the registry.
+///
+/// This also takes care of Microsoft's preferred endianness for GUIDs.
 fn try_parse_guid(inp: &NullU16) -> Option<GUID> {
     let inp = OsString::from_wide(inp.as_ref());
     let inp = inp.to_string_lossy();
@@ -246,6 +265,17 @@ fn try_parse_guid(inp: &NullU16) -> Option<GUID> {
     })
 }
 
+/// Turn a double-null-terminated list of strings into a `Vec`
+///
+/// For example:
+/// ```text
+/// thing1\0
+/// thing2\0
+/// thing_three\0
+/// \0
+/// ```
+///
+/// Because of how Rust uses slices, this function is tolerant of malformed input.
 fn multi_sz_to_list(inp: &[u16]) -> Vec<NullU16> {
     let mut ret = inp
         .split(|x| *x == 0)
@@ -267,6 +297,7 @@ fn multi_sz_to_list(inp: &[u16]) -> Vec<NullU16> {
     ret
 }
 
+/// Given an instance ID (`USB\...`) and a GUID, get a device path (`\\?\...`)
 fn find_instance_paths(guid: &GUID, dev_inst_id: &NullU16) -> Result<Vec<NullU16>, CfgMgrError> {
     loop {
         let mut list_sz = 0;
@@ -303,6 +334,7 @@ fn find_instance_paths(guid: &GUID, dev_inst_id: &NullU16) -> Result<Vec<NullU16
     }
 }
 
+/// Given a "devnode", retrieve a particular string property
 fn get_devnode_str_property(
     devnode: u32,
     key: &DEVPROPKEY,
@@ -345,6 +377,12 @@ fn get_devnode_str_property(
     Ok(NullU16::from(buf))
 }
 
+/// Given a "devnode", retrieve a "custom" string property
+///
+/// This uses functions which are supposedly "reserved for system use"
+/// but are documented to exist. This appears to retrieve specific
+/// registry keys related to the device, which appears to be the only way
+/// to retrieve the WinUSB `DeviceInterfaceGUID`
 fn get_devnode_custom_str_property(
     devnode: u32,
     key: windows_strings::PCWSTR,
@@ -394,6 +432,10 @@ fn get_devnode_custom_str_property(
     Ok(NullU16::from(buf))
 }
 
+/// Given a "devnode", retrieve a "custom" multi-string property
+///
+/// This is similar to [get_devnode_custom_str_property] but returns a list.
+/// This is used to get the `DeviceInterfaceGUIDs` (plural) property.
 fn get_devnode_custom_multi_str_property(
     devnode: u32,
     key: windows_strings::PCWSTR,
@@ -443,6 +485,7 @@ fn get_devnode_custom_multi_str_property(
     Ok(multi_sz_to_list(&buf))
 }
 
+/// Given a device path (`\\?\...`), get an instance ID (`USB\...`)
 fn get_dev_inst_id(instance_path: &[u16]) -> Result<NullU16, WinEnumerationError> {
     let mut buf_sz = 0;
     let mut ptype = 0;
@@ -492,6 +535,12 @@ fn get_dev_inst_id(instance_path: &[u16]) -> Result<NullU16, WinEnumerationError
     Ok(NullU16::from(buf))
 }
 
+/// A handle for communicating with a USB hub
+///
+/// This hub might be a root hub, and this is used to retrieve descriptors from the device.
+/// The hub driver supposedly implements caching to not generate unnecessary bus traffic.
+///
+/// Closes the handle on drop.
 struct HubHandle(HANDLE, u32);
 impl HubHandle {
     fn get_descriptor(
@@ -602,6 +651,7 @@ impl Drop for HubHandle {
     }
 }
 
+/// Given a device path to something which might not even be a WinUSB device, begin looking into it
 fn probe_new_device(
     db: &Mutex<WinHotplugDatabase>,
     guid: GUID,
@@ -695,6 +745,9 @@ fn probe_new_device(
     probe_winusb_device_further(db, devnode, this_dev_inst_id, instance_path)
 }
 
+/// Process a device which definitely is a WinUSB device
+///
+/// This performs the logic to "stitch together" interfaces.
 fn probe_winusb_device_further(
     db: &Mutex<WinHotplugDatabase>,
     devnode: u32,
@@ -1075,6 +1128,7 @@ fn probe_winusb_device_further(
     }))
 }
 
+/// Look for all existing USB devices, by looking through the USB "enumerator"
 fn get_existing_usb_device_instances() -> Result<Vec<NullU16>, CfgMgrError> {
     loop {
         let mut list_sz = 0;
@@ -1109,6 +1163,10 @@ fn get_existing_usb_device_instances() -> Result<Vec<NullU16>, CfgMgrError> {
     }
 }
 
+/// Given an existing device which _is_ USB but not necessarily WinUSB, begin looking into it
+///
+/// This is different from [probe_new_device] because we have different information available.
+// TODO: Can we reduce the code duplication?
 fn try_probe_existing_device(
     db: &Mutex<WinHotplugDatabase>,
     existing_dev_inst: NullU16,
@@ -1187,6 +1245,7 @@ fn try_probe_existing_device(
     probe_winusb_device_further(db, devnode, existing_dev_inst, instance_path.as_ref())
 }
 
+/// Device notification callback
 unsafe extern "system" fn notify_cb(
     _hnotify: HCMNOTIFICATION,
     ctx: *const std::ffi::c_void,
@@ -1314,6 +1373,7 @@ struct DeviceState {
     interfaces: HashMap<u8, OsString>,
 }
 
+/// Internal state for stitching together interfaces into a single logical device
 #[derive(Debug)]
 struct WinHotplugDatabase {
     next_session_id: u64,
@@ -1335,6 +1395,7 @@ impl WinHotplugDatabase {
     }
 }
 
+/// Upon a brand-new device, contains all the cached information we've gathered
 #[derive(Debug)]
 pub struct WinHotplugDeviceInfo {
     pub dev_desc: usb_ch9::ch9_core::DeviceDescriptor,
@@ -1344,15 +1405,25 @@ pub struct WinHotplugDeviceInfo {
     pub string_descs: HashMap<u8, Vec<u8>>,
 }
 
+/// Messages from the enumeration thread to the main thread
 #[derive(Debug)]
 pub enum WinHotplugNotification {
+    /// A new interface was detected
     NewInterface {
         session_id: u64,
         interface_no: u8,
         interface_path: OsString,
+        /// Is this driver bound to the entire device? Or is the composite driver involved?
+        ///
+        /// This affects how USB interface numbers (`bInterfaceNumber`)
+        /// are mapped to WinUSB associated interface indices.
         whole_device: bool,
+        /// Cached device information, only upon _new_ devices
+        ///
+        /// This is not present if adding an interface to a device that we already know about.
         device_info: Option<WinHotplugDeviceInfo>,
     },
+    /// An interface was removed
     RemoveInterface {
         session_id: u64,
         interface_no: u8,
@@ -1360,6 +1431,10 @@ pub enum WinHotplugNotification {
     },
 }
 
+/// State related to handling hotplug notifications
+///
+/// Note that the callback thread contains (unsafe, non-owning) pointers
+/// back into this struct.
 #[derive(Debug)]
 pub struct WinNotificationHandler {
     h_notif: HCMNOTIFICATION,
