@@ -7,6 +7,10 @@
         "message": "Open WebUSB debugging page",
         "description": "The default \"open debug page\" message"
     },
+    "error_message": {
+        "message": "An error occurred! $1",
+        "description": "Button (browser action) tooltip if native process breaks"
+    },
     "permission_title": {
         "message": "WebUSB permission page",
         "description": "Title of the permission page"

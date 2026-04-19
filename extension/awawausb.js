@@ -13,8 +13,14 @@ browser.browserAction.onClicked.addListener(() => {
 
 // Connection to native stub
 let nativeport = browser.runtime.connectNative("awawausb_native_stub");
-nativeport.onDisconnect.addListener((p) => {
+nativeport.onDisconnect.addListener(async (p) => {
     console.warn("Native process disconnected!", p.error);
+    await browser.browserAction.setTitle({
+        title: browser.i18n.getMessage("error_message", p.error)
+    });
+    await browser.browserAction.setIcon({
+        path: "icons/error.png"
+    });
 })
 
 const EXTENSION_ID = "awawausb@arcanenibble.com";
