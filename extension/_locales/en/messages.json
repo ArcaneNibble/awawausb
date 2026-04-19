@@ -3,6 +3,10 @@
         "message": "Adds WebUSB capabilities to the browser",
         "description": "The description in the manifest metadata"
     },
+    "button_open_debug": {
+        "message": "Open WebUSB debugging page",
+        "description": "The default \"open debug page\" message"
+    },
     "permission_title": {
         "message": "WebUSB permission page",
         "description": "Title of the permission page"

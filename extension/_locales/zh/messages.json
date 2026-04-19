@@ -3,6 +3,10 @@
         "message": "把浏览器加多WebUSB功能",
         "description": "The description in the manifest metadata"
     },
+    "button_open_debug": {
+        "message": "打开WebUSB调试页",
+        "description": "The default \"open debug page\" message"
+    },
     "permission_title": {
         "message": "WebUSB权限页面",
         "description": "Title of the permission page"

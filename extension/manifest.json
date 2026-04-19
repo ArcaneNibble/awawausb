@@ -14,7 +14,8 @@
   },
 
   "browser_action": {
-    "default_icon": "icons/browser-action.png"
+    "default_icon": "icons/browser-action.png",
+    "default_title": "__MSG_button_open_debug__"
   },
 
   "content_scripts": [
