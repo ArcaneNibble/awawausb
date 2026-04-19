@@ -9,7 +9,10 @@
 
   "browser_specific_settings": {
     "gecko": {
-      "id": "awawausb@arcanenibble.com"
+      "id": "awawausb@arcanenibble.com",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
 
