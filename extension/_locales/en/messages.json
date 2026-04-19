@@ -1,4 +1,8 @@
 {
+    "manifest_descr": {
+        "message": "Adds WebUSB capabilities to the browser",
+        "description": "The description in the manifest metadata"
+    },
     "permission_title": {
         "message": "WebUSB permission page",
         "description": "Title of the permission page"

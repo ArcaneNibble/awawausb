@@ -5,7 +5,7 @@
 
   "default_locale": "en",
 
-  "description": "test",
+  "description": "__MSG_manifest_descr__",
 
   "browser_specific_settings": {
     "gecko": {
