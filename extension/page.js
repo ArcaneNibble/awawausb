@@ -439,6 +439,9 @@
         }
         async controlTransferOut(setup, data) {
             setup = check_control_xfer_params(setup);
+            if (data === null || data === undefined) {
+                data = new ArrayBuffer(0);
+            }
             if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
                 throw new TypeError("parameter is not a BufferSource");
             }
