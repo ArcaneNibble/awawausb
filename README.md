@@ -6,9 +6,11 @@ In order to use this, you need to _both_ install the extension in your browser a
 
 ## Installation instructions
 
+You can install this extension by downloading binaries from the GitHub "Releases" section (in the right-hand column), or you can build from source.
+
 ### Installing the extension
 
-TODO: The extension needs to be packed and signed by Mozilla.
+To install a signed version of the extension, download the .xpi file and open it in Firefox.
 
 To load a _testing_ version of the extension in Firefox Developer Edition, open `about:debugging`, select "This Firefox" in the left-hand list, then "Load Temporary Add-on…", and then browse to the `manifest.json` inside the `extension/` directory.
 
