@@ -4,6 +4,14 @@ This extension adds WebUSB functionality to Firefox by making use of [native mes
 
 In order to use this, you need to _both_ install the extension in your browser and install a small program (separate from the browser) on your computer. This extra program is called the "native stub".
 
+## Feature support
+
+This extension is supposed to be compatible with Chrome's implementation. Please report any differences you encounter that result in software not working.
+
+However, unlike Chrome, this API is only exposed on the main page and is not available in [Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Using_web_workers).
+
+Android cannot be supported, because it does not have native messaging capabilities.
+
 ## Installation instructions
 
 You can install this extension by downloading binaries from the GitHub "Releases" section (in the right-hand column), or you can build from source.
