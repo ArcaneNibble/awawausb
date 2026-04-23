@@ -189,6 +189,17 @@ ACTION!="remove", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1234", TAG+="uaccess"
 
 In order to configure options 1 and 2, use `MODE=` and `GROUP=` commands (in a udev rule, placed in the same location).
 
+You may or may not then need to use the `udevadm` command (as `root`) to reload and/or reapply the new rules. (Supposedly, manually reloading the rules has not been necessary for a long time, but it continues to persist via copy-paste.)
+
+```shell
+# To reload the rules (probably not necessary?)
+udevadm control --reload-rules
+# To reapply rules to all existing devices
+udevadm trigger
+```
+
+Alternatively, you might try unplugging the device and plugging it back in (which will cause any new rules to be applied to the device).
+
 ## Developer documentation
 
 See [Documentation/architecture.md](Documentation/architecture.md) to get started.
