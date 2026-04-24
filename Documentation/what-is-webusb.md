@@ -1,6 +1,6 @@
 # Physical devices and your browser: an overview
 
-There are currently many different ways that web pages can talk to and use devices connected to your computer:
+There are many ways that web pages can talk to and use devices connected to your computer. To programmers, these are known as "application programming interfaces", or APIs. This is a list of some of them:
 
 - WebUSB
 - WebHID
@@ -8,16 +8,16 @@ There are currently many different ways that web pages can talk to and use devic
 - Web MIDI
 - Web NFC
 - Web Bluetooth
-- cameras and microphones
+- Media Streams API (cameras and microphones)
 - Gamepad API
 - "WiFi" (standard computer networking)
 - "universal" peripherals such as a mouse, keyboard, or screen
 
-Confusingly, despite how many of these devices today use USB _physical connectors_ to plug into your computer, devices which fall under the "more specific" categories cannot (or in practice do not, even if they could) use _WebUSB_ as the programming interface.
+Confusingly, even though many of these devices today use USB _physical connectors_ to plug into your computer, devices with "more specific" functions cannot (or in practice do not, even if they could) use _WebUSB_ as the programming interface.
 
-In general, the designers of these APIs have attempted to force other developers to choose only the "most appropriate" way to interact with devices. Often, this is because the designers of these APIs know that both users and programmers hold implicit assumptions about how devices should work. However, it is incredibly difficult to write down what these assumptions actually _are_ (see: the remainder of this document), so "following what has been done before" appears to become the simplest solution.
+In general, the designers of these APIs wanted to force other developers to choose only the "most appropriate" way to interact with each kind of device. Often, this is because the designers of these APIs know that both users and programmers hold implicit assumptions about how devices should work. However, it is incredibly difficult to write down what these assumptions actually _are_ (see: the remainder of this document), so designers often default to "following what has been done before".
 
-Unfortunately, the differences between these interfaces exists primarily for the convenience of (different groups of) _computer programmers_. It is not a natural nor inherent property of the devices themselves. Figuring out "what is going on" thus requires understanding how _programmers_ understand the hardware.
+Unfortunately, the differences between these APIs exists primarily for the convenience of (different groups of) _computer programmers_. The "most appropriate" API is not a natural nor inherent property of the devices themselves. Many of these rules are a consequence of history and were not intentionally designed. Figuring out "what is going on" thus requires understanding how _programmers_ understand the hardware.
 
 ## "Universal" computer peripherals
 
@@ -27,7 +27,9 @@ Web pages always have access to these devices without asking you, because these 
 
 For example, a web page does not need to ask you for permission to show you text or pictures. If you do not want to see the text or pictures, you can close the page, minimize it, or cover it up with a different program. A web page can track everything you type on the keyboard and every movement you make with the mouse, but only if the web page "has focus" because you have selected it to interact with. If you select a different web page or program, the web page you have moved away from automatically cannot receive keyboard and mouse inputs anymore.
 
-However, not every "thing that has buttons which can be pressed" is a "keyboard", and not every "device for inputting relative motion" is a "mouse" or "pointing devices". Sometimes, devices which do _not_ have these physical shapes _are_ nonetheless designed to be treated as keyboards or mice (for example, barcode scanners are typically keyboards). The specific choice is made by the designer of the device, usually in an attempt to get a specific outcome the designer wants within the constraints of the ambient behavior of the computing ecosystem _at the time_.
+Even though keyboards are assumed to be universal, not every "thing that has buttons which can be pressed" is a "keyboard" (for example, devices related to music are not keyboards in this sense, and specialized keyboards such as a [stenotype](https://en.wikipedia.org/wiki/Stenotype) or assistive technology may or may not be programmed as a keyboard). Likewise, even though a "pointer" or "cursor" is common on user interfaces (other than touchscreens), not every "device for inputting relative motion" is a "mouse" or "pointing devices".
+
+Sometimes, a device which does _not_ have buttons to press is nonetheless designed to be treated as a keyboard (for example, barcode scanners are typically keyboards). Other devices, such as drawing tablets, can be designed to be treated as a pointing device. The specific choice is made by the designer of the device, usually to get some specific result the designer wants within the constraints of how computers _at the time_ tend to behave.
 
 ## "Generic" computer peripherals
 
@@ -35,12 +37,16 @@ Some peripherals have been associated with computers for a long time and are con
 
 Examples of this category of device include cameras (specifically, "webcams"), microphones, printers, and network adapters.
 
-Because programmers believe that these device behaviors are well-defined, they have designed specific interfaces for them:
+Because programmers and other "technology adopters" have been using these peripherals with computers for a long time, they have ideas of how these devices "should" "always" work. As a result, there are APIs with specific behaviors:
 
-- requesting to use your camera
-- requesting to use your microphone
-- asking the browser to print the web page ([yes, really!](https://developer.mozilla.org/en-US/docs/Web/API/Window/print))
-- making requests to other computers
+- using your camera or microphone requires asking for permission (otherwise web pages could violate your offline privacy)
+- a web page can ask the browser to print itself ([yes, really!](https://developer.mozilla.org/en-US/docs/Web/API/Window/print)). however, the web page does not get to specify anything about _how_ it gets printed
+- a web page can make requests to other computers, according to [a set of rules](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Same-origin_policy)
+
+Observe also these examples of APIs being shaped by history and programmer interest, rather than explicit design:
+
+- web pages can access _webcams_, but there isn't a specific way for web pages to transfer data from "digital cameras" (because "digital cameras" are an older technology, predating always-online connectivity, that was slowly becoming obsolete by the time of the _widespread_ push for webcam support)
+- there is no web page support for document scanners
 
 ## Human Interface Devices
 
@@ -52,9 +58,9 @@ One of the goals of USB was to unify all of these devices into a single, flexibl
 
 In practice, a number of things happened:
 
-- "Universal" peripherals such as mice and keyboards did adapt well to USB HID (although these were rapidly becoming cheap commodity products either way). Value-added features were introduced by making use of parts of the standard specifically designed for such.
-- Game controllers converged around approximately-one single successful "gamepad" design, relegating other designs (for example, racing or flight simulators) to niche hobbies. Although this often uses USB, [other market forces](<https://en.wikipedia.org/wiki/Halo_(franchise)>) pushed some (but not all) controllers [away from](https://learn.microsoft.com/en-us/windows/win32/xinput/xinput-game-controller-apis-portal) the USB HID specification.
-- Designers of "simple" devices realized that the USB HID specification was designed generically enough to be useful for their devices, even if their devices have nothing to do with interfacing with humans at all (for example, [uninterruptible power supplies](https://en.wikipedia.org/wiki/Uninterruptible_power_supply) or environmental monitoring sensors). Many of these devices intentionally take advantage of various historically "looser" security policies around "input" devices compared to other types of hardware.
+- "Universal" peripherals such as mice and keyboards did adapt well to USB HID (although these were rapidly becoming cheap commodity products either way). Value-added features could still be added because the standard specifically left room for them.
+- Game controllers converged around approximately-one single successful "gamepad" design, relegating other designs (for example, racing or flight simulators) to niche hobbies. Although modern gamepad controllers often use USB, [other market forces](<https://en.wikipedia.org/wiki/Halo_(franchise)>) pushed some (but not all) controllers [away from](https://learn.microsoft.com/en-us/windows/win32/xinput/xinput-game-controller-apis-portal) the USB HID specification.
+- Designers of "simple" devices realized that the USB HID specification was designed generically enough to be useful for their devices, even if their devices have nothing to do with interfacing with humans at all (for example, [uninterruptible power supplies](https://en.wikipedia.org/wiki/Uninterruptible_power_supply) or environmental monitoring sensors). Designers found that the cultural associations of the "input device" category (for example, looser security rules) were more convenient than those of other categories of hardware.
 
 Finally, technological change caused the HID specification to be reused for non-USB devices. This reuse allows programmers to use existing code, again saving development costs. This is possible because many large software systems are built out of [abstract "layers"](https://en.wikipedia.org/wiki/Abstraction_layer) which can be separated and recombined in new ways.
 
@@ -77,7 +83,9 @@ So, as a result of all of this (note that every guideline in this list has its e
 
 Serial ports are an extremely old and (arguably not) simple communications interface that long predates personal computers (or [computers at all](https://en.wikipedia.org/wiki/Baudot_code)).
 
-During the early history of the computer, [teletypes](https://en.wikipedia.org/wiki/Teleprinter), an already-existing technology, were often used to interact with them. A long, continuous history of reusing existing infrastructure then followed, even as cheaper technology made personal computers possible. For example, personal computers could connect to large, expensive, shared computers using [modems](https://en.wikipedia.org/wiki/Modem) and the telephone network… often by behaving like a teletype. This led to most computers (both personal computers and otherwise) having serial ports.
+During the early history of the computer, [teletypes](https://en.wikipedia.org/wiki/Teleprinter), an already-existing technology, were often used to interact with them. They were useful because, just like computers, they make use of digital codes to represent letters and symbols.
+
+A long, continuous history of reusing existing infrastructure then followed, even as cheaper technology made personal computers possible. For example, personal computers could connect to large, expensive, shared computers using [modems](https://en.wikipedia.org/wiki/Modem) and the telephone network… often by behaving like a teletype. This led to most computers of a certain era (both personal computers and otherwise) having serial ports.
 
 During the personal computer era (and before the invention of USB), the serial port was itself reused for various peripherals, such as [mice](https://en.wikipedia.org/wiki/Microsoft_Mouse), [PDAs](https://en.wikipedia.org/wiki/Personal_digital_assistant), [early home automation](<https://en.wikipedia.org/wiki/X10_(industry_standard)>), etc.
 
@@ -111,10 +119,14 @@ If you do have unusual requirements as mentioned above, NFC smart cards _can_ be
 
 ## Bluetooth
 
-Bluetooth is the name for _two_ mostly-unrelated wireless technologies, Bluetooth Classic and Bluetooth Low Energy. These technologies attempted to define standards for wireless communications between portable devices.
+Bluetooth is the name for _two_ mostly-unrelated wireless technologies, Bluetooth Classic and Bluetooth Low Energy. These technologies attempted to define standards for wireless communications between portable devices (similar to how USB attempted to standardize wired connections).
 
 Despite being called "Web Bluetooth", the Web Bluetooth API is designed for Bluetooth Low Energy _only_, specifically the Generic Attribute Profile (GATT).
 
 Although Bluetooth as a technology is only slightly newer than USB, and applications such as wireless headsets have been available for a long time, the complexity and costs slowed down its early adoption. Adoption increased dramatically after the popularization of mobile phones.
 
 Nowadays, wireless devices which are designed to be used with a mobile phone or tablet most likely use Bluetooth, specifically Bluetooth Low Energy. However, as mentioned above, [input devices are special](#human-interface-devices).
+
+## WebUSB
+
+Finally, WebUSB is a "catch-all" for USB devices that are _none of the above_.
