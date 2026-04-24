@@ -12,6 +12,12 @@ However, unlike Chrome, this API is only exposed on the main page and is not ava
 
 Android cannot be supported, because it does not have native messaging capabilities.
 
+## WebUSB vs other interfaces
+
+This extension only supports WebUSB. WebUSB is only one of several ways for web pages to access physical devices (even if the device is physically plugged in to your computer using _USB connectors_).
+
+Please read [this document](Documentation/what-is-webusb.md) for a detailed explanation.
+
 ## Installation instructions
 
 You can install this extension by downloading binaries from the GitHub "Releases" section (in the right-hand column), or you can build from source.
