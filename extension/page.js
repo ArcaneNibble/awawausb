@@ -610,7 +610,7 @@
             return (this[DEV_DESC].bcdDevice >> 8) & 0xff;
         }
         get deviceVersionMinor() {
-            return (this[DEV_DESC].bcdDevice >> 4) & 0x4f;
+            return (this[DEV_DESC].bcdDevice >> 4) & 0xf;
         }
         get deviceVersionSubminor() {
             return this[DEV_DESC].bcdDevice & 0xf;
