@@ -1004,16 +1004,12 @@ impl USBDevice {
             if timeoutfd >= 0 {
                 let timeout_dur = Duration::from_millis(timeout);
 
-                let timeout_struct = libc::itimerspec {
-                    it_interval: libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    },
-                    it_value: libc::timespec {
-                        tv_sec: timeout_dur.as_secs() as i64,
-                        tv_nsec: timeout_dur.subsec_nanos() as i64,
-                    },
+                let mut timeout_struct = libc::itimerspec {
+                    it_interval: libc::timespec::default(),
+                    it_value: libc::timespec::default(),
                 };
+                timeout_struct.it_value.tv_sec = timeout_dur.as_secs() as libc::time_t;
+                timeout_struct.it_value.tv_nsec = (timeout_dur.subsec_nanos() as i32).into();
                 let ret = unsafe {
                     libc::timerfd_settime(timeoutfd, 0, &timeout_struct, ptr::null_mut())
                 };
